@@ -5,11 +5,11 @@
 #   - Client       : abstract base (device handling, optimizer lifecycle, etc.)
 #   - BenignClient : honest FedProx-style local training
 #
-# Attacker implementations live in dedicated files:
-#   - attack_baseline_hallucination.py  (label-flipping hallucination -- this paper)
-#   - attack_baseline_sign_flipping.py  (ICML '18 baseline)
-#   - attack_baseline_gaussian.py       (USENIX Security '20 baseline)
-#   - attack_baseline_alie.py           (NeurIPS '19 baseline)
+# Attacker implementations live under the ``attack/`` package:
+#   - attack.hallucination  (label-flipping hallucination -- this paper)
+#   - attack.sign_flipping  (ICML '18 baseline)
+#   - attack.gaussian       (USENIX Security '20 baseline)
+#   - attack.alie           (NeurIPS '19 baseline)
 
 from __future__ import annotations
 

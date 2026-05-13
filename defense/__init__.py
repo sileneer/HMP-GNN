@@ -1,4 +1,4 @@
-# defense.py
+# defense/__init__.py
 # Pluggable defense strategies for federated aggregation.
 #
 # Provides a unified interface so that Server.aggregate_updates can swap between
@@ -9,6 +9,8 @@
 #   - Defense         : abstract base class
 #   - FedAvgDefense   : faithful migration of the original FedAvg logic
 #   - HMPGAEDefense   : hypergraph message-passing GAE immunization (this paper)
+#
+# Additional defense baselines can live under defense.baselines (see that package).
 
 from __future__ import annotations
 
@@ -143,7 +145,7 @@ class HMPGAEDefense(Defense):
         self._fallback = FedAvgDefense()
 
     def _lazy_init(self, flat_update_dim: int, device: torch.device) -> None:
-        # Import lazily so that `import defense` remains cheap even when only
+        # Import lazily so that importing this package stays cheap when only
         # FedAvgDefense is used (e.g. baselines).
         from hmp_gae.runtime import HMPGAERuntime
 

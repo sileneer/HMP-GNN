@@ -8,7 +8,6 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
 import pandas as pd
 import urllib.request
-import io
 import os
 from typing import List, Dict
 
@@ -51,7 +50,11 @@ class NewsDataset(Dataset):
 
 
 class DataManager:
-    """Manages text classification data distribution (AG News, IMDB, DBpedia, Yahoo Answers) for federated experiments (data-agnostic attack setting)"""
+    """Manages text classification data for federated experiments.
+
+    AG News and Yahoo Answers CSVs live under ``data/ag_news/`` and ``data/yahoo_answers/``
+    (see ``_load_ag_news`` / ``_load_yahoo_answers``). IMDB and DBpedia load from Hugging Face.
+    """
 
     def __init__(self, num_clients, num_attackers, test_seed,
                  dataset_size_limit=None, batch_size=None, test_batch_size=None,
@@ -71,7 +74,8 @@ class DataManager:
             test_batch_size: Batch size for test/validation data loaders (required)
             model_name: Hugging Face model name for tokenizer initialization
             max_length: Max token length (AG News: 128, IMDB: 256-512, DBpedia: 512, Yahoo Answers: 256)
-            dataset: 'ag_news' | 'imdb' | 'dbpedia' | 'yahoo_answers'
+            dataset: 'ag_news' | 'imdb' | 'dbpedia' | 'yahoo_answers'. For ``ag_news`` / ``yahoo_answers``,
+                     CSVs are read from ``data/ag_news/`` and ``data/yahoo_answers/`` (see ``data_loader.py``).
         """
 
         if batch_size is None or test_batch_size is None:
@@ -191,12 +195,13 @@ class DataManager:
     def _load_yahoo_answers(self):
         """
         Load Yahoo Answers 10-category dataset.
-        1. Check Yahoo_Answers_Datasets/ directory first (like AG News).
-        2. If not found, download from Hugging Face and save to local for next time.
+        1. Read ``data/yahoo_answers/train.csv`` and ``data/yahoo_answers/test.csv`` if both exist.
+        2. Otherwise download from Hugging Face and cache under ``data/yahoo_answers/``.
         """
-        data_dir = 'Yahoo_Answers_Datasets'
-        train_file = os.path.join(data_dir, 'train.csv')
-        test_file = os.path.join(data_dir, 'test.csv')
+        data_dir = os.path.join("data", "yahoo_answers")
+        os.makedirs(data_dir, exist_ok=True)
+        train_file = os.path.join(data_dir, "train.csv")
+        test_file = os.path.join(data_dir, "test.csv")
 
         if os.path.exists(train_file) and os.path.exists(test_file):
             print(f"  ✅ Found local data files in {data_dir}/ directory. Loading...")
@@ -212,7 +217,7 @@ class DataManager:
             except ImportError:
                 raise ImportError("Yahoo Answers requires datasets library. Install: pip install datasets")
 
-            print(f"  🌐 Local data not found. Downloading from Hugging Face...")
+            print("  🌐 Local Yahoo Answers CSVs not both under data/yahoo_answers/. Downloading from Hugging Face...")
             ds = load_dataset("yassiracharki/Yahoo_Answers_10_categories_for_NLP")
             train_data = ds["train"]
             test_data = ds["test"]
@@ -246,8 +251,6 @@ class DataManager:
             self.test_texts = test_texts
             self.test_labels = [int(x) - 1 for x in test_labels_raw]
 
-            # Save to local for next time (like AG News)
-            os.makedirs(data_dir, exist_ok=True)
             train_save = pd.DataFrame({'label': [l + 1 for l in self.train_labels], 'text': self.train_texts})
             test_save = pd.DataFrame({'label': [l + 1 for l in self.test_labels], 'text': self.test_texts})
             train_save.to_csv(train_file, index=False, header=False, quoting=1)
@@ -272,61 +275,57 @@ class DataManager:
 
     def _load_ag_news(self):
         """
-        [OPTIMIZED] Robust data loading with local cache priority.
-        1. Check AG_News_Datasets/ directory first (if exists).
-        2. Check root directory for train.csv/test.csv.
-        3. If not found, download from GitHub.
-        4. Strict failure if download fails (No synthetic data).
+        Load AG News from ``data/ag_news/train.csv`` and ``data/ag_news/test.csv``.
+
+        Expected CSV format (no header): label, title, text (CharCNN / mhjabreel layout).
+        Missing splits are downloaded from GitHub into ``data/ag_news/`` without overwriting
+        any CSV that already exists locally.
         """
-        # Priority 1: Check AG_News_Datasets/ directory
-        train_file_alt = 'AG_News_Datasets/train.csv'
-        test_file_alt = 'AG_News_Datasets/test.csv'
-        # Priority 2: Check root directory
-        train_file = 'train.csv'
-        test_file = 'test.csv'
-        
-        # URLs (verified: mhjabreel/CharCnn_Keras is a reliable source)
+        data_dir = os.path.join("data", "ag_news")
+        os.makedirs(data_dir, exist_ok=True)
+        train_path = os.path.join(data_dir, "train.csv")
+        test_path = os.path.join(data_dir, "test.csv")
+
         train_url = "https://raw.githubusercontent.com/mhjabreel/CharCnn_Keras/master/data/ag_news_csv/train.csv"
         test_url = "https://raw.githubusercontent.com/mhjabreel/CharCnn_Keras/master/data/ag_news_csv/test.csv"
 
         try:
-            # 1. Try Local Load (Priority 1: AG_News_Datasets/ directory)
-            if os.path.exists(train_file_alt) and os.path.exists(test_file_alt):
-                print(f"  ✅ Found local data files in AG_News_Datasets/ directory. Loading...")
-                train_df = pd.read_csv(train_file_alt, header=None, names=['label', 'title', 'text'])
-                test_df = pd.read_csv(test_file_alt, header=None, names=['label', 'title', 'text'])
-            # Priority 2: Check root directory
-            elif os.path.exists(train_file) and os.path.exists(test_file):
-                print(f"  ✅ Found local data files ({train_file}, {test_file}). Loading...")
-                train_df = pd.read_csv(train_file, header=None, names=['label', 'title', 'text'])
-                test_df = pd.read_csv(test_file, header=None, names=['label', 'title', 'text'])
-            
-            # 2. Try Download
+            has_train = os.path.exists(train_path)
+            has_test = os.path.exists(test_path)
+
+            if has_train and has_test:
+                print(f"  ✅ Found local AG News files in {data_dir}/. Loading...")
+                train_df = pd.read_csv(train_path, header=None, names=['label', 'title', 'text'])
+                test_df = pd.read_csv(test_path, header=None, names=['label', 'title', 'text'])
             else:
-                print("  🌐 Local data not found. Downloading from GitHub...")
-                print(f"     Source: {train_url}")
-                
-                # Train Data
-                with urllib.request.urlopen(train_url, timeout=20) as response:
-                    data = response.read().decode('utf-8')
-                    # Save to root directory for next time
-                    with open(train_file, 'w', encoding='utf-8') as f:
-                        f.write(data)
-                    train_df = pd.read_csv(io.StringIO(data), header=None, names=['label', 'title', 'text'])
-                
-                # Test Data
-                with urllib.request.urlopen(test_url, timeout=20) as response:
-                    data = response.read().decode('utf-8')
-                    with open(test_file, 'w', encoding='utf-8') as f:
-                        f.write(data)
-                    test_df = pd.read_csv(io.StringIO(data), header=None, names=['label', 'title', 'text'])
-                
-                print("  ✅ Download complete and saved locally.")
+                if not has_train and not has_test:
+                    print("  🌐 No AG News CSVs under data/ag_news/. Downloading train + test from GitHub...")
+                elif not has_train:
+                    print("  🌐 Missing train.csv under data/ag_news/. Downloading train split only...")
+                else:
+                    print("  🌐 Missing test.csv under data/ag_news/. Downloading test split only...")
+
+                if not has_train:
+                    print(f"     Train source: {train_url}")
+                    with urllib.request.urlopen(train_url, timeout=20) as response:
+                        train_raw = response.read().decode('utf-8')
+                    with open(train_path, 'w', encoding='utf-8') as f:
+                        f.write(train_raw)
+                if not has_test:
+                    print(f"     Test source: {test_url}")
+                    with urllib.request.urlopen(test_url, timeout=20) as response:
+                        test_raw = response.read().decode('utf-8')
+                    with open(test_path, 'w', encoding='utf-8') as f:
+                        f.write(test_raw)
+
+                train_df = pd.read_csv(train_path, header=None, names=['label', 'title', 'text'])
+                test_df = pd.read_csv(test_path, header=None, names=['label', 'title', 'text'])
+                print(f"  ✅ AG News CSVs ready under {data_dir}/.")
 
         except Exception as e:
             print(f"\n❌ CRITICAL ERROR: Data loading failed: {e}")
             print("🛑 STRICT MODE: Synthetic data generation is DISABLED to ensure validity.")
-            print("   Please ensure internet access or manually place 'train.csv' and 'test.csv' in the folder.")
+            print(f"   Place train.csv and test.csv under {data_dir}/ or ensure network access for download.")
             raise e
 
         # Process Data

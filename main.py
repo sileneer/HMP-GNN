@@ -250,7 +250,7 @@ def setup_experiment(config):
             # Create attacker based on attack_method
             if attack_method == 'ALIE':
                 # ========== ALIE Attack Client ==========
-                from attack_baseline_alie import ALIEAttackerClient
+                from attack.alie import ALIEAttackerClient
                 print(f"  Client {client_id}: ATTACKER (ALIE Attack)")
                 print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
                 
@@ -275,7 +275,7 @@ def setup_experiment(config):
                 )
             elif attack_method == 'SignFlipping':
                 # ========== Sign-Flipping Attack Client (ICML '18: g^byz = -scale * g_own) ==========
-                from attack_baseline_sign_flipping import SignFlippingAttackerClient
+                from attack.sign_flipping import SignFlippingAttackerClient
                 print(f"  Client {client_id}: ATTACKER (Sign-Flipping Attack, ICML '18)")
                 print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
                 # Build DataLoader for attacker so it can compute g_own (same as benign client)
@@ -302,7 +302,7 @@ def setup_experiment(config):
                 )
             elif attack_method == 'Hallucination':
                 # ========== Hallucination Attack (Label-Flipping, this paper) ==========
-                from attack_baseline_hallucination import HallucinationAttackerClient
+                from attack.hallucination import HallucinationAttackerClient
                 print(f"  Client {client_id}: ATTACKER (Hallucination Attack - Label Flipping)")
                 print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
                 client_texts_h = [data_manager.train_texts[i] for i in client_indices[client_id]]
@@ -332,7 +332,7 @@ def setup_experiment(config):
                 )
             elif attack_method == 'Gaussian':
                 # ========== Gaussian (Random Model Poisoning) Attack - USENIX Security '20 ==========
-                from attack_baseline_gaussian import GaussianAttackerClient
+                from attack.gaussian import GaussianAttackerClient
                 print(f"  Client {client_id}: ATTACKER (Gaussian Attack, USENIX Security '20)")
                 print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
                 gaussian_attack_start_round = config.get('gaussian_attack_start_round', None)
@@ -437,7 +437,7 @@ def run_downstream_task2_if_configured(config: Dict, results_dir: Path) -> None:
     if not probes_cfg:
         print(
             "\n⚠️  Task 2 skipped: set config['downstream_probes'] to a probe JSON path "
-            "(FL training does not need a `data/` folder; datasets are downloaded or use root train.csv / AG_News_Datasets/)."
+            "(FL training uses ``data/ag_news/`` or ``data/yahoo_answers/`` for those datasets; see data_loader.py)."
         )
         return
     probes = Path(probes_cfg)

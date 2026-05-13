@@ -4,7 +4,7 @@ __pycache__/
 /plan
 
 # User-generated experiment outputs (figures, CSVs, JSONs, checkpoints).
-# Re-created by `python _v1_demo_run.py` / `python _v1_seed_runs.py`.
+# Re-created by `python main.py` (and Colab runs that call `main.main`).
 results/*
 !results/.gitkeep
 .DS_Store

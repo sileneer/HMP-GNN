@@ -20,11 +20,16 @@
 ├── decoder_adapters.py                # SeqCLS backbone → CausalLM transfer adapters
 ├── run_downstream_generation.py       # CLI: checkpoint + probes → JSONL (Task 2)
 ├── visualization.py                   # Experiment figures / plots
-├── attack_baseline_hallucination.py   # Hallucination attack via label-flipping (V1, main)
-├── attack_baseline_sign_flipping.py   # Sign-flipping baseline (ICML ’18)
-├── attack_baseline_gaussian.py        # Gaussian baseline (USENIX Security ’20)
-├── attack_baseline_alie.py            # ALIE baseline (NeurIPS ’19)
-├── defense.py                         # Pluggable defense strategies (V1: FedAvg / HMP-GAE)
+├── attack/                            # Attack baselines (label-flip + classical model poisoning)
+│   ├── __init__.py                    # Re-exports attacker client classes
+│   ├── hallucination.py               # Hallucination attack (V1, main)
+│   ├── sign_flipping.py               # Sign-flipping (ICML ’18)
+│   ├── gaussian.py                    # Gaussian (USENIX Security ’20)
+│   └── alie.py                        # ALIE (NeurIPS ’19)
+├── defense/                           # Server-side defense wiring
+│   ├── __init__.py                    # FedAvg / HMP-GAE + build_defense (was root defense.py)
+│   └── baselines/                     # Placeholder for future defense baselines
+│       └── __init__.py
 ├── evaluation_hallucination.py        # V2 M7: end-of-FL PPL (backbone transfer to CausalLM)
 ├── hmp_gae/                           # HMP-GAE defense sub-package (this paper)
 │   ├── node_features.py               #   eta_i = f_enc(Delta_i, stats, history)
@@ -34,11 +39,15 @@
 │   ├── losses.py                      #   BCE(H,H_hat) + smoothness + hist
 │   ├── trust_scorer.py                #   closed-form trust -> alpha_i
 │   └── runtime.py                     #   end-to-end HMPGAERuntime
-├── run_demo.py                        # Entry: run {NoAttack, Hallu+FedAvg, Hallu+HMPGAE} + all 4 figures
+├── data/                              # Local CSV caches (AG News + Yahoo Answers)
+│   ├── ag_news/                       # train.csv, test.csv (label,title,text — no header)
+│   └── yahoo_answers/                 # train.csv, test.csv (label,text — no header; 1-based labels)
 └── HMP_GAE_Colab.ipynb                # Colab: main experiment + full inline results; then disconnect GPU
 ```
 
-There is no committed `data/` directory: **Task 1** loads AG News (etc.) from the network or from optional root `train.csv` / `test.csv` (see `data_loader.py`). **Task 2** requires a probe list JSON path you provide (`--probes` / `downstream_probes`).
+**AG News** and **Yahoo Answers** read CSVs under **`data/ag_news/`** and **`data/yahoo_answers/`** respectively. If either split is missing, the loader downloads and caches it there (see [`data_loader.py`](data_loader.py)). **IMDB** and **DBpedia** still load directly from Hugging Face `datasets` and do not use those folders.
+
+**Task 2** requires a probe list JSON path you provide (`--probes` / `downstream_probes`).
 
 ## Supported Models
 
@@ -48,8 +57,8 @@ There is no committed `data/` directory: **Task 1** loads AG News (etc.) from th
 
 ## Supported Datasets
 
-- **AG News**: `dataset='ag_news'`, `num_labels=4`, `max_length=128` (default)
-- **Yahoo Answers** (yassiracharki/Yahoo_Answers_10_categories_for_NLP): `dataset='yahoo_answers'`, `num_labels=10`, `max_length=256` (10 topic classes, 1.4M train / 60K test)
+- **AG News**: `dataset='ag_news'`, `num_labels=4`, `max_length=128` (default). CSVs: `data/ag_news/train.csv`, `data/ag_news/test.csv`.
+- **Yahoo Answers** (yassiracharki/Yahoo_Answers_10_categories_for_NLP): `dataset='yahoo_answers'`, `num_labels=10`, `max_length=256` (10 topic classes, 1.4M train / 60K test). CSVs: `data/yahoo_answers/train.csv`, `data/yahoo_answers/test.csv`.
 - **IMDB** (stanfordnlp/imdb): `dataset='imdb'`, `num_labels=2`, `max_length=512` (or 256 for lower memory)
 - **DBpedia 14** (fancyzhx/dbpedia_14): `dataset='dbpedia'`, `num_labels=14`, `max_length=512` (14 topic classes, 560K train / 70K test)
 - Configure in `main.py` via `dataset`, `num_labels`, and `max_length`.
@@ -72,15 +81,15 @@ python main.py
 
 ### Google Colab Execution (or other Cloud AI platforms)
 
-**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb), enable **T4 GPU**, then **Run all**. It runs **`main.main(...)`** only (same `config` as [`main.py`](main.py), plus optional **`COLAB_CONFIG_OVERRIDES`**) and prints the full `*_results.json` / PPL / per-round tables inline. The last cell calls **`google.colab.runtime.unassign()`** to release the GPU. For the separate **quick three-scenario** script (Fig A / C / E / F on `run_demo` settings), use **`run_demo.py`** in the shell or locally — not the Colab notebook. Wall-clock time follows `main.py` (e.g. Qwen2.5 + 10 rounds is long).
+**Recommended: run the notebook.** Open [`HMP_GAE_Colab.ipynb`](HMP_GAE_Colab.ipynb), enable **T4 GPU**, then **Run all**. It runs **`main.main(...)`** only (same `config` as [`main.py`](main.py), plus optional **`COLAB_CONFIG_OVERRIDES`**) and prints the full `*_results.json` / PPL / per-round tables inline. The last cell calls **`google.colab.runtime.unassign()`** to release the GPU. Wall-clock time follows `main.py` (e.g. Qwen2.5 + 10 rounds is long).
 
-**Alternative: pure shell (quick three-run demo).**
+**Alternative: pure shell (same entry as local).**
 
-```python
-!git clone https://github.com/GuangLun2000/HMP-GNN.git
-%cd HMP-GNN
-!pip install -q -r requirements.txt
-!python run_demo.py
+```bash
+git clone https://github.com/GuangLun2000/HMP-GNN.git
+cd HMP-GNN
+pip install -r requirements.txt
+python main.py
 ```
 
 <br>
@@ -141,14 +150,9 @@ V1 ships the paper's core immunization pipeline end-to-end:
 },
 ```
 
-### V1 demo: end-to-end verification
+### Representative results (example regime)
 
-```bash
-# End-to-end demo: NoAttack / Hallu+FedAvg / Hallu+HMP-GAE, produces all 4 figures
-python run_demo.py
-```
-
-Representative V1 demo numbers (N=10 clients, 2 attackers, 3 rounds, AG News subset, DistilBERT + LoRA):
+Runs below use **`python main.py`** with comparable settings (e.g. N=10 clients, 2 attackers, short rounds, AG News subset, DistilBERT + LoRA); tune `config` in [`main.py`](main.py) to reproduce.
 
 | Setting | Final Clean Acc (3-seed mean ± std) |
 |---|---|
@@ -156,7 +160,7 @@ Representative V1 demo numbers (N=10 clients, 2 attackers, 3 rounds, AG News sub
 | Hallu + HMP-GAE  | 0.6361 ± 0.0474 |
 | **Delta (HMP-GAE improvement)** | **+0.0694** |
 
-The trust-weight evolution PDF (`figC_*.pdf`) shows the two attackers (red) collapsing to `alpha_i ≈ 0` from round 2 onward, while the 8 benign clients share the remaining mass close to uniform `1/8 = 0.125`.
+The trust-weight evolution in logged metrics / custom plots shows the two attackers (when configured) driven toward low aggregation mass while benign clients retain most of the weight.
 
 ### V2 M7: Hallucination Evaluation Metrics (no text generation)
 
@@ -175,12 +179,11 @@ Config knobs (already in [main.py](main.py)):
 'ppl_max_length': None,                          # None -> reuse config['max_length']
 ```
 
-Output files per run (the `results/` folder is gitignored -- everything below is produced by running `run_demo.py` locally / on Colab):
+Output files per run (the `results/` folder is gitignored; paths below are produced by **`python main.py`** or the Colab notebook calling `main.main`):
 
-- `results/<exp>_results.json` -- adds `progressive_metrics.cse` (per-round CSE list) and per-round `classification_semantic_entropy` in each `round_log`.
-- `results/<exp>_eval_ppl.json` -- dict with `ppl_mean`, `ppl_per_class`, `n_samples`, `mean_nll`.
-- `results/_v1_demo/figA_defense_bar.{png,pdf}` and `figC_trust_evolution.{png,pdf}` -- V1 core figures.
-- `results/_v1_demo/figE_metrics_grouped.{png,pdf}` and `figF_cse_evolution.{png,pdf}` -- V2 M7 three-metric bar + CSE evolution.
+- `results/<exp>_results.json` — config, round logs, `progressive_metrics` (including per-round CSE when enabled).
+- `results/<exp>_eval_ppl.json` — end-of-FL PPL summary when `eval_perplexity` applies.
+- `results/<exp>_figure1.png` … **`_figure5.png`** — publication-style plots from [`visualization.py`](visualization.py) (`ExperimentVisualizer.generate_all_figures`).
 
 ### V1 / V2 limitations and roadmap
 

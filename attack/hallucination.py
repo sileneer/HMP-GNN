@@ -1,4 +1,4 @@
-# attack_baseline_hallucination.py
+# attack/hallucination.py
 # Hallucination-inducing attacker via training-time label flipping.
 #
 # Design principles (V1):
@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch

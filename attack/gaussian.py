@@ -1,4 +1,4 @@
-# attack_baseline_gaussian.py
+# attack/gaussian.py
 # Gaussian (Random Model Poisoning) Attack Implementation - USENIX Security '20
 #
 # This module implements the Gaussian attack as a Model Poisoning baseline.
@@ -24,16 +24,16 @@ from client import Client
 class GaussianAttackerClient(Client):
     """
     Gaussian (Random Model Poisoning) Attack - USENIX Security '20
-    
+
     Randomly crafts malicious updates by sampling each parameter from
     a Gaussian distribution estimated from benign updates.
-    
+
     Paper: "Local Model Poisoning Attacks to Byzantine-Robust Federated Learning"
     Fang et al., USENIX Security 2020
-    
+
     Formula: For each j, attack_vec[j] ~ N(mean_j, std_j²)
     where mean_j = mean(benign_updates[:, j]), std_j = std(benign_updates[:, j])
-    
+
     This attack is:
     - Data-agnostic: Does not modify training data
     - Random: No optimization, pure random sampling from estimated distribution

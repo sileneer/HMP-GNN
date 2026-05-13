@@ -1,4 +1,4 @@
-# attack_baseline_sign_flipping.py
+# attack/sign_flipping.py
 # Sign-Flipping Attack Implementation - Model Poisoning Baseline (ICML '18)
 #
 # This module implements the Sign-flipping attack as defined in:
@@ -16,12 +16,12 @@ from client import BenignClient
 class SignFlippingAttackerClient(BenignClient):
     """
     Sign-Flipping Attack - ICML '18 Byzantine Baseline
-    
+
     Malicious update = -scale * own_update, where own_update is the update this client
     would have sent if honest (computed by local training on its assigned data).
     Paper: "We test Kardam against a baseline Byzantine behavior (3 out of 10 workers
     send g^byz_p = −10 gp)" — Damaskinos et al., ICML 2018.
-    
+
     This attack:
     - Uses real local training (inherited from BenignClient) to get g_own
     - Flips and scales: sends -sign_flip_scale * g_own (default scale=10 per paper)
@@ -36,7 +36,7 @@ class SignFlippingAttackerClient(BenignClient):
                  grad_clip_norm: float = 1.0):
         """
         Initialize Sign-Flipping attacker client (ICML '18: g^byz = -scale * g_own).
-        
+
         Args:
             client_id: Unique identifier for the client
             model: The neural network model (will be deep copied)
@@ -76,10 +76,10 @@ class SignFlippingAttackerClient(BenignClient):
     def camouflage_update(self, poisoned_update: torch.Tensor) -> torch.Tensor:
         """
         ICML '18: malicious = -scale * g_own. Here poisoned_update is g_own from local_train.
-        
+
         Args:
             poisoned_update: The own update from local_train (g_own).
-        
+
         Returns:
             Malicious update: -sign_flip_scale * poisoned_update (or honest if before attack_start_round).
         """

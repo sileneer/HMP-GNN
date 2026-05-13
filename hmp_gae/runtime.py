@@ -327,7 +327,7 @@ class HMPGAERuntime:
             stats["L_smooth"] = float(last_loss_bundle.L_smooth.item())
             stats["L_hist"] = float(last_loss_bundle.L_hist.item())
         # Keep Z around so the caller can persist it for visualization,
-        # but do not let it leak into the standard JSON log (defense.py
-        # strips this key before logging).
+        # but do not let it leak into the standard JSON log (defense
+        # package strips this key before logging).
         stats["Z"] = Z.detach().cpu().numpy()
         return aggregated.detach().cpu(), stats

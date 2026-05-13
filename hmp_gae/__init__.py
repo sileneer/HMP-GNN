@@ -8,4 +8,4 @@
 #   - decoder       : inner-product adjacency decoder + hyperedge decoder
 #   - losses        : BCE(H, H_hat) + smoothness(Z, A_hat) + hist(Z, Z_hist)
 #   - trust_scorer  : closed-form s_i -> alpha_i = softmax(s_i / tau)
-#   - runtime       : HMPGAERuntime wiring everything together (used by defense.py)
+#   - runtime       : HMPGAERuntime wiring everything together (used by defense package)
