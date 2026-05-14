@@ -876,25 +876,27 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # V1 first experiment: HMP-GAE defense vs Hallucination attack, N=10 (8 benign + 2 attackers), 10 rounds.
-        # For a FedAvg baseline comparison, override via:
-        #     python -c "import main; main.main({'experiment_name':'fedavg_hallu_n10_10r','defense_method':'fedavg'})"
-        'experiment_name': 'hmpgae_hallu_n10_10r',
-        'seed': 42069,  # Random seed for reproducibility (int), 42 is the default
+        # V1 primary experiment: HMP-GAE defense vs Hallucination attack.
+        # Setup: N=7 (5 benign + 2 attackers, 28.6% attack ratio), 50 rounds, Qwen2.5-0.5B + LoRA.
+        # For a FedAvg baseline comparison, run with override:
+        #     python -c "import main; main.main({'experiment_name':'fedavg_hallu_n7_r50_qwen','defense_method':'fedavg'})"
+        'experiment_name': 'hmpgae_hallu_n7_r50_qwen',
+        'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 10,  # Total number of federated learning clients (int)
-        'num_attackers': 2,  # Number of attacker clients (int, must be < num_clients)
-        'num_rounds': 50,    # Total number of federated learning rounds (int)
+        'num_clients': 7,    # Total clients: 5 benign + 2 attackers
+        'num_attackers': 2,  # Number of attacker clients (last num_attackers clients are attackers)
+        'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
-        'client_lr': 5e-5,   # Learning rate for local client training (float)
-        'server_lr': 1.0,    # Server learning rate for model aggregation (fixed at 1.0)
-        'batch_size': 64,    # Batch size for local training. 64 is safer on a 15GB T4 with Qwen2.5-0.5B + seq_len=128. Raise to 128 on larger GPUs.
-        'test_batch_size': 128,  # Batch size for test/validation data loaders (int)
-        'local_epochs': 2,   # Number of local training epochs per round (int, per paper Section IV)
-        'grad_clip_norm': 1.0,  # Benign client grad clipping. Decoder models: Pythia-160m try 0.5 if nan; Qwen2.5-0.5B typically stable at 1.0
-        'alpha': 0.0,  # FedProx proximal coefficient μ: loss += (μ/2)*||w - w_global||². Set 0 for standard FedAvg, >0 to penalize local drift from global model (helps Non-IID stability)
+        'client_lr': 5e-5,   # Learning rate for local client training
+        'server_lr': 1.0,    # Server aggregation lr (fixed at 1.0 for standard FedAvg aggregation)
+        'batch_size': 32,    # 32 is safe for T4 15GB with Qwen2.5-0.5B + seq_len=128; raise to 64 on A100
+        'test_batch_size': 64,   # Inference uses less VRAM; 64 is safe
+        'local_epochs': 1,   # 1 epoch per round: 50 rounds × 1 epoch sufficient for LoRA convergence
+                             # and keeps total wall-clock time manageable (~3-4 h on T4)
+        'grad_clip_norm': 1.0,  # Qwen2.5-0.5B is typically stable at 1.0; reduce to 0.5 if NaN
+        'alpha': 0.0,  # FedProx μ: 0 = standard FedAvg local step; >0 penalises local drift from global
         
         # ========== Dataset Configuration ==========
         # Choose dataset: 'ag_news' | 'imdb' | 'dbpedia' | 'yahoo_answers' — set num_labels and max_length accordingly
@@ -923,8 +925,9 @@ def main(config_overrides: Optional[Dict] = None):
         # Switch to 'non-iid' with dirichlet_alpha in [0.3, 1.0] once baseline numbers are stable.
         'data_distribution': 'iid',      # 'iid' uniform, 'non-iid' Dirichlet-heterogeneous
         'dirichlet_alpha': 0.5,          # Only used when data_distribution='non-iid'. Lower = more heterogeneous.
-        # 'dataset_size_limit': None,  # Limit dataset size (None = full dataset). AG News: ~120K; IMDB: 25K; DBpedia: 560K; Yahoo Answers: 1.4M
-        'dataset_size_limit': 20000,  # Limit for faster experimentation. When set: train ≤ limit, test ≤ limit × 0.15 (same rule for all datasets)
+        # 'dataset_size_limit': None,  # Full dataset: AG News ~120K; IMDB 25K; DBpedia 560K; Yahoo Answers 1.4M
+        'dataset_size_limit': 10000,  # 10K train → ~1428 samples/client (7 clients, IID); test ≤ 1500
+                                      # Enough for LoRA convergence on AG News; keeps per-round time ~3-5 min on T4
 
         # ========== Training Mode Configuration ==========
         'use_lora': True,  # True for LoRA fine-tuning, False for full fine-tuning
@@ -983,7 +986,11 @@ def main(config_overrides: Optional[Dict] = None):
             'eta_dim': 64,               # output dim of f_enc MLP
             'random_proj_seed': 42,      # shared across rounds
             # --- Hypergraph (H) ---
-            'knn_k': 3,                  # k-NN neighbors; hyperedge size = k+1
+            'knn_k': 2,                  # k-NN neighbors; hyperedge size = k+1.
+                                         # k=2 for N=7: larger k forces benign nodes to include
+                                         # attackers in their hyperedges, diluting the isolation
+                                         # signal. k=2 keeps the 2-attacker sub-cluster tighter
+                                         # and the graph_residual contrast sharper.
             # --- HMP encoder / decoder ---
             'hidden_dim': 64,
             'latent_dim': 32,
@@ -1008,14 +1015,20 @@ def main(config_overrides: Optional[Dict] = None):
             'hist_weight_beta': 0.0,
             'softmax_tau': 0.1,          # only used when trust_mode='softmax'
             # Trust-to-weight mapping:
-            #   'reject_then_fedavg' (default): detect attackers via trust
-            #       z-score > reject_z_threshold, then data-size-weighted
-            #       FedAvg among kept clients. Best behavior for V1.
-            #   'softmax': pure softmax over trust logits (can concentrate
-            #       weight on a single benign client).
-            'trust_mode': 'reject_then_fedavg',
-            'reject_z_threshold': 0.75,  # tuned on synthetic 8/2 split
+            #   'soft_reject_fedavg' (default): sigmoid gate on graph_residual_z,
+            #       then data-size FedAvg among continuously-trusted clients.
+            #       Robust to threshold miscalibration; works for any N.
+            #   'reject_then_fedavg': hard binary rejection (gr_z > threshold),
+            #       then FedAvg.  Calibrated for 8B/2A; fragile on other configs.
+            #   'softmax': pure softmax of trust logits (concentrates on 1-2 clients).
+            'trust_mode': 'soft_reject_fedavg',
+            'reject_z_threshold': 0.75,  # sigmoid midpoint (same scale as hard threshold)
+            'soft_reject_k': 2.0,        # sigmoid steepness: 2=recommended, 3=near-binary
             'keep_min': 1,
+            # --- Cold start ---
+            # False (default): graph_residual works from round 0, no history needed.
+            # True: fall back to FedAvg on round 0 when no Z_hist exists yet.
+            'cold_start_fallback': False,
             # --- History (EMA) ---
             'hist_ema_beta': 0.9,
             # --- Misc ---
@@ -1076,6 +1089,69 @@ def main(config_overrides: Optional[Dict] = None):
     results, metrics = run_experiment(config)
     analyze_results(metrics)
         
+
+def run_suite(
+    suite: List[Dict],
+    base_overrides: Optional[Dict] = None,
+) -> None:
+    """
+    Run a list of experiments sequentially, each as a separate main() call.
+
+    Args:
+        suite:          List of per-experiment override dicts.  Each dict is
+                        merged on top of base_overrides (and on top of main()'s
+                        default config via the existing config_overrides path).
+                        An empty dict {} means "use base_overrides as-is".
+        base_overrides: Shared overrides applied to every experiment before the
+                        per-experiment dict.  Useful for Colab-wide settings
+                        (e.g. dataset_size_limit) that every run should share.
+
+    Example (Colab notebook):
+        run_suite(
+            suite=[
+                {'experiment_name': 'hmpgae_hallu_n7_r50_qwen', 'defense_method': 'hmp_gae'},
+                {'experiment_name': 'fedavg_hallu_n7_r50_qwen',  'defense_method': 'fedavg'},
+            ],
+            base_overrides=COLAB_CONFIG_OVERRIDES,  # shared knobs, e.g. num_rounds=5 for a quick test
+        )
+    """
+    n = len(suite)
+    print(f"\n{'=' * 60}")
+    print(f"EXPERIMENT SUITE: {n} run(s) queued")
+    print(f"{'=' * 60}\n")
+
+    for idx, exp_overrides in enumerate(suite):
+        combined: Dict = {}
+        if base_overrides:
+            combined.update(base_overrides)
+        combined.update(exp_overrides)
+
+        exp_name = combined.get('experiment_name', f'run_{idx + 1}')
+        print(f"\n{'=' * 60}")
+        print(f"RUN {idx + 1}/{n}: {exp_name}")
+        print(f"{'=' * 60}")
+
+        try:
+            main(config_overrides=combined if combined else None)
+            print(f"\nRUN {idx + 1}/{n} DONE: {exp_name}")
+        except KeyboardInterrupt:
+            print(f"\nSuite interrupted after run {idx + 1}/{n}.")
+            raise
+        except Exception as e:
+            import traceback
+            print(f"\nRUN {idx + 1}/{n} FAILED: {exp_name}")
+            print(f"  Error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            print(f"  Continuing to next run...\n")
+        finally:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    print(f"\n{'=' * 60}")
+    print(f"SUITE COMPLETE: {n} run(s) finished")
+    print(f"{'=' * 60}\n")
+
 
 if __name__ == "__main__":
     main()

@@ -220,3 +220,63 @@ def reject_then_weighted(
         ds = uniform
         total = ds.sum().clamp(min=1.0)
     return ds / total
+
+
+def reject_soft_weighted(
+    trust: "TrustResult",
+    data_sizes: torch.Tensor,
+    reject_z_threshold: float = 0.75,
+    soft_reject_k: float = 2.0,
+    keep_min: int = 1,
+) -> torch.Tensor:
+    """
+    Soft-rejection variant of reject_then_weighted.
+
+    Instead of a binary mask (gr_z > threshold → weight=0), applies a sigmoid
+    gate that smoothly reduces weight for suspicious clients:
+
+        gate_i = sigmoid( -k * (gr_z_i - threshold) )
+
+    Interpretation:
+        gr_z_i << threshold  →  gate ≈ 1.0  (clearly benign, full weight)
+        gr_z_i == threshold  →  gate = 0.5  (at decision boundary, halved)
+        gr_z_i >> threshold  →  gate ≈ 0.0  (clearly attacker, near-zero)
+
+    Final weight = data_size_i * gate_i / sum_j(data_size_j * gate_j)
+
+    Advantages over hard rejection:
+    - No cliff at a single threshold value; miscalibration degrades gracefully.
+    - Works for any N without re-tuning the threshold as a hard cutoff.
+    - The steepness k controls how "hard" the boundary is:
+        k=1  very smooth, k=3  near-binary, k=2  recommended default.
+    - The threshold parameter controls the midpoint (same scale as before,
+      but semantics shift from "reject above" to "sigmoid centre").
+
+    Args:
+        trust:               TrustResult from compute_trust_weights.
+        data_sizes:          (N,) raw data-size weights (for FedAvg scaling).
+        reject_z_threshold:  sigmoid midpoint on the gr_z scale.
+        soft_reject_k:       sigmoid steepness (higher = closer to hard reject).
+        keep_min:            if all gates fall below 0.1, force top-k by gr_z.
+    """
+    device = trust.alpha.device
+    dtype = trust.alpha.dtype
+    N = trust.alpha.numel()
+
+    gr_z = trust.graph_residual_z.detach().clone()
+    gate = torch.sigmoid(-soft_reject_k * (gr_z - float(reject_z_threshold)))
+
+    # Safety: if every client's gate is tiny (all look suspicious), fall back
+    # to keeping the keep_min least-isolated clients with uniform weight.
+    if int((gate > 0.1).sum().item()) < max(1, keep_min):
+        k = max(1, keep_min)
+        idx = torch.topk(-gr_z, k=min(k, N)).indices
+        gate = torch.zeros(N, device=device, dtype=dtype)
+        gate[idx] = 1.0
+
+    ds = data_sizes.to(device=device, dtype=dtype) * gate
+    total = ds.sum()
+    if total.item() <= 0:
+        ds = gate
+        total = ds.sum().clamp(min=1.0)
+    return ds / total

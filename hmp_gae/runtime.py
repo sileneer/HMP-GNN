@@ -31,7 +31,7 @@ from .hypergraph import knn_hypergraph
 from .encoder import HMPEncoder
 from .decoder import inner_product_decoder, HyperedgeDecoder
 from .losses import total_loss
-from .trust_scorer import compute_trust_weights, weighted_aggregate, reject_then_weighted
+from .trust_scorer import compute_trust_weights, weighted_aggregate, reject_then_weighted, reject_soft_weighted
 
 
 class HMPGAERuntime:
@@ -80,24 +80,32 @@ class HMPGAERuntime:
         #   'softmax': pure softmax of trust logits. Simpler but tends to
         #     concentrate weight on 1-2 benign clients when their residuals
         #     are nearly tied.
-        self.trust_mode = str(self.cfg.get("trust_mode", "reject_then_fedavg"))
-        # Threshold picked by scanning 0.5/0.75/1.0/1.25/1.5 on a synthetic
-        # 8-benign/2-attacker setup: 0.75 gives the best balance between
-        # attacker detection rate (4/5 rounds) and benign false-reject rate
-        # (3/40 spots). Defaulting to 0.75 for V1.
+        # Trust-to-weight mapping mode:
+        #   'soft_reject_fedavg' (default, recommended): sigmoid gate on
+        #     graph_residual_z, scales suspicious clients down smoothly;
+        #     robust to threshold miscalibration across different N values.
+        #   'reject_then_fedavg': hard binary rejection via z-score threshold,
+        #     then data-size FedAvg among kept clients.  Fragile near threshold.
+        #   'softmax': pure softmax on trust logits; tends to concentrate
+        #     weight on 1-2 benign clients when residuals are tied.
+        self.trust_mode = str(self.cfg.get("trust_mode", "soft_reject_fedavg"))
+        # reject_z_threshold: midpoint of the sigmoid gate for soft_reject_fedavg,
+        # or the hard cutoff for reject_then_fedavg.  Same scale (gr_z units)
+        # for both modes so switching is a single config-key change.
         self.reject_z_threshold = float(self.cfg.get("reject_z_threshold", 0.75))
+        # soft_reject_k: sigmoid steepness for soft_reject_fedavg.
+        # k=1 → very smooth; k=2 → recommended; k=3 → near-binary.
+        self.soft_reject_k = float(self.cfg.get("soft_reject_k", 2.0))
         self.keep_min = int(self.cfg.get("keep_min", 1))
         self.hist_ema_beta = float(self.cfg.get("hist_ema_beta", 0.9))
         self.proj_seed = int(self.cfg.get("random_proj_seed", 42))
-        # Cold-start policy: when no historical embedding is yet available,
-        # the trust score has only a single weak signal (residual on an
-        # untrained graph) and easily overfits to noise. Falling back to
-        # FedAvg keeps round-0 behavior identical to the baseline while
-        # still letting HMP-GAE train on the data so it can kick in from
-        # round 1 onwards. Set to False to force HMP-GAE from round 0.
-        self.cold_start_fallback = bool(self.cfg.get("cold_start_fallback", True))
-        # After how many rounds of collected history is HMP trust considered
-        # reliable (>= this many). 1 is enough because EMA retains memory.
+        # Cold-start policy: Signal 1 (graph_residual from k-NN hypergraph)
+        # is computed from raw projected updates and does NOT need Z_hist.
+        # hist_weight_beta defaults to 0.0 so hist_dev has zero weight anyway.
+        # Defaulting to False: HMP-GAE detects from round 0 using the graph
+        # signal, which is available immediately.  Set True only if you observe
+        # spurious rejections on round 0 with very small N.
+        self.cold_start_fallback = bool(self.cfg.get("cold_start_fallback", False))
         self.min_history_for_trust = int(self.cfg.get("min_history_for_trust", 1))
 
         # ---- Modules ---- #
@@ -274,17 +282,30 @@ class HMPGAERuntime:
         else:
             alpha_cold = torch.ones(N, device=self.device) / N
 
-        # Cold-start: HMP trust is unreliable without at least one round of
-        # history -- defer to data-size FedAvg for round 0, then switch on.
+        # Cold-start: graph_residual (Signal 1) works from round 0 because it
+        # only needs the k-NN hypergraph of raw projected updates (no Z_hist).
+        # hist_weight_beta defaults to 0.0, so hist_dev has no influence anyway.
+        # We only fall back when cold_start_fallback=True is explicitly set.
         use_cold_start_fallback = (
             self.cold_start_fallback and (not has_hist)
         )
         if use_cold_start_fallback:
             used_alpha = alpha_cold
             used_mode = "cold_start_fedavg"
+        elif self.trust_mode == "soft_reject_fedavg":
+            # Soft sigmoid gate on graph_residual_z, then data-size FedAvg
+            # among the (continuously) trusted clients.  Robust to threshold
+            # miscalibration: suspicious clients are down-weighted, not zeroed.
+            used_alpha = reject_soft_weighted(
+                trust=trust,
+                data_sizes=ds_tensor,
+                reject_z_threshold=self.reject_z_threshold,
+                soft_reject_k=self.soft_reject_k,
+                keep_min=self.keep_min,
+            )
+            used_mode = "soft_reject_fedavg"
         elif self.trust_mode == "reject_then_fedavg":
-            # Reject attackers by structural z-score threshold, then
-            # aggregate the kept clients with their natural FedAvg weights.
+            # Hard binary rejection via z-score threshold, then data-size FedAvg.
             used_alpha = reject_then_weighted(
                 trust=trust,
                 data_sizes=ds_tensor,

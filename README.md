@@ -143,9 +143,9 @@ V1 ships the paper's core immunization pipeline end-to-end:
     'train_steps_per_round': 5, 'train_lr': 1e-3,
     'lambda_H': 1.0, 'lambda_A': 1.0, 'lambda_hist': 0.5,
     'graph_weight': 1.0, 'residual_weight_alpha': 0.3, 'hist_weight_beta': 0.0,
-    'trust_mode': 'reject_then_fedavg', 'reject_z_threshold': 0.75,
+    'trust_mode': 'soft_reject_fedavg', 'reject_z_threshold': 0.75, 'soft_reject_k': 2.0,
     'softmax_tau': 0.1, 'hist_ema_beta': 0.9,
-    'cold_start_fallback': True,
+    'cold_start_fallback': False,
     'device': 'cpu', 'random_proj_seed': 42,
 },
 ```
