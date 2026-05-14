@@ -58,8 +58,9 @@ class Server:
 
         # Track historical data
         self.history = {
-            'clean_acc': [],  # Clean accuracy
-            'local_accuracies': {}  # Local accuracies per client per round {client_id: [acc1, acc2, ...]}
+            'clean_acc': [],
+            'local_accuracies': {},   # {client_id: [acc_r0, acc_r1, ...]}
+            'local_cse': {},          # {client_id: [cse_r0, cse_r1, ...]}
         }
 
     def register_client(self, client):
@@ -358,45 +359,58 @@ class Server:
 
         return aggregation_log
 
-    def evaluate_local_accuracy(self, client) -> float:
+    def evaluate_local_metrics(self, client) -> Tuple[float, float]:
         """
-        Evaluate local model accuracy for a specific client.
-        Uses the global test set for fair comparison across clients.
-        
-        Memory optimization: Temporarily moves model to GPU for evaluation, then back to CPU.
+        Evaluate a client's local model on the server test set in a single forward pass.
+
+        Returns (accuracy, classification_semantic_entropy).
+
+        In real FL the server never sees client.model directly — it reconstructs
+        the local model as w_global + Δ_i.  In this simulation the two are
+        equivalent because client.model == w_global + Δ_i after local_train().
+        Using the server's public test set is inherent to FedLLMs evaluation.
         """
-        # Temporarily move model to GPU for evaluation
         model_was_on_cpu = not getattr(client, '_model_on_gpu', False)
         if model_was_on_cpu:
             client.model.to(self.device)
             client._model_on_gpu = True
-        
+
         try:
             client.model.eval()
             correct = 0
             total = 0
-            
+            total_cse = 0.0
+
             with torch.no_grad():
-                # Use global test loader for fair comparison (same test set for all clients)
                 for batch in self.test_loader:
                     input_ids = batch['input_ids'].to(self.device)
                     attention_mask = batch['attention_mask'].to(self.device)
                     labels = batch['labels'].to(self.device)
 
                     outputs = client.model(input_ids, attention_mask)
-                    predictions = torch.argmax(outputs, dim=1)
 
+                    predictions = torch.argmax(outputs, dim=1)
                     correct += (predictions == labels).sum().item()
                     total += labels.size(0)
-        
+
+                    log_probs = F.log_softmax(outputs, dim=1)
+                    probs = log_probs.exp()
+                    batch_cse = -(probs * log_probs).sum(dim=1)
+                    total_cse += batch_cse.sum().item()
+
             accuracy = correct / total if total > 0 else 0.0
+            cse = total_cse / total if total > 0 else 0.0
         finally:
-            # Move model back to CPU to free GPU memory
             if model_was_on_cpu:
                 client.model.cpu()
                 client._model_on_gpu = False
-        
-        return accuracy
+
+        return accuracy, cse
+
+    def evaluate_local_accuracy(self, client) -> float:
+        """Backward-compatible wrapper; prefer evaluate_local_metrics."""
+        acc, _ = self.evaluate_local_metrics(client)
+        return acc
     
     def evaluate(self) -> float:
         """
@@ -580,32 +594,37 @@ class Server:
         # Evaluate the global model (compute accuracy, loss and CSE in one pass).
         clean_acc, global_loss, mean_cse = self.evaluate_with_loss()
 
-        # Evaluate local accuracies for each client
+        # Evaluate per-client local accuracy and CSE (single forward pass each).
         local_accs_this_round = {}
+        local_cse_this_round = {}
         for client in self.clients:
             try:
-                local_acc = self.evaluate_local_accuracy(client)
+                local_acc, local_cse = self.evaluate_local_metrics(client)
                 local_accs_this_round[client.client_id] = local_acc
-                
-                # Update history
+                local_cse_this_round[client.client_id] = local_cse
+
                 if client.client_id not in self.history['local_accuracies']:
                     self.history['local_accuracies'][client.client_id] = []
                 self.history['local_accuracies'][client.client_id].append(local_acc)
+
+                if client.client_id not in self.history['local_cse']:
+                    self.history['local_cse'][client.client_id] = []
+                self.history['local_cse'][client.client_id].append(local_cse)
             except Exception as e:
-                # Skip if evaluation fails (e.g., empty data loader)
-                print(f"  ⚠️  Could not evaluate local accuracy for client {client.client_id}: {e}")
+                print(f"  ⚠️  Could not evaluate local metrics for client {client.client_id}: {e}")
 
         # Create log for the current round
         round_log = {
             'round': round_num + 1,
             'clean_accuracy': clean_acc,
-            'global_loss': global_loss,  # Add global loss to log for visualization
-            'classification_semantic_entropy': mean_cse,  # V2 M7 metric
+            'global_loss': global_loss,
+            'classification_semantic_entropy': mean_cse,
             'acc_diff': (abs(clean_acc - self.history['clean_acc'][-2])
                          if len(self.history['clean_acc']) > 1 else 0.0),
             'aggregation': aggregation_log,
             'server_lr': self.server_lr,
-            'local_accuracies': local_accs_this_round
+            'local_accuracies': local_accs_this_round,
+            'local_cse': local_cse_this_round,
         }
 
         self.log_data.append(round_log)
@@ -613,7 +632,6 @@ class Server:
         # Display results
         print(f"\n📊 Round {round_num + 1} Results:")
         print(f"  Clean Accuracy: {clean_acc:.4f}")
-        # Show performance change
         if len(self.history['clean_acc']) > 1:
             prev_clean = self.history['clean_acc'][-2]
             delta_prev = clean_acc - prev_clean
@@ -621,12 +639,19 @@ class Server:
             delta_best = clean_acc - best_clean
             print(f"  ΔClean vs prev: {delta_prev:+.4f}")
             print(f"  ΔClean vs best: {delta_best:+.4f}")
-        
-        # Display global loss (already computed together with accuracy)
         print(f"  Global Loss: {global_loss:.4f}")
         if mean_cse is not None:
-            print(f"  Classification Semantic Entropy: {mean_cse:.4f}")
+            print(f"  Global CSE: {mean_cse:.4f}")
         else:
-            print("  Classification Semantic Entropy: (disabled via config)")
+            print("  Global CSE: (disabled via config)")
+
+        # Per-client local metrics table
+        print(f"  Per-client local metrics (local model on server test set):")
+        attacker_ids = {c.client_id for c in self.clients if getattr(c, 'is_attacker', False)}
+        for cid in sorted(local_accs_this_round):
+            tag = "ATK" if cid in attacker_ids else "BGN"
+            acc_v = local_accs_this_round[cid]
+            cse_v = local_cse_this_round.get(cid, float('nan'))
+            print(f"    [{tag}] Client {cid}: acc={acc_v:.4f}  cse={cse_v:.4f}")
 
         return round_log

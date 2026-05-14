@@ -536,7 +536,12 @@ def run_experiment(config):
         'config': config,
         'results': server.log_data,
         'progressive_metrics': progressive_metrics,
-        'local_accuracies': server.history['local_accuracies']  # Include local accuracies
+        'local_accuracies': server.history['local_accuracies'],
+        'local_cse': server.history.get('local_cse', {}),
+        'attacker_ids': [
+            c.client_id for c in server.clients
+            if getattr(c, 'is_attacker', False)
+        ],
     }
 
     results_path = results_dir / f"{config['experiment_name']}_results.json"
