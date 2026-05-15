@@ -39,6 +39,7 @@ class Defense(ABC):
         data_sizes: List[float],
         round_num: int,
         device: torch.device,
+        probe_distributions: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
         Compute the aggregated update Delta_global from per-client updates.
@@ -50,6 +51,10 @@ class Defense(ABC):
                         Defenses may ignore this (e.g. HMP-GAE uses trust scores).
             round_num: 0-indexed round counter; lets defenses track history.
             device: Target torch device for aggregation.
+            probe_distributions: Optional (N, K, C) tensor of per-client softmax
+                outputs on a fixed K-sample probe subset. Used by HMP-GAE as a
+                semantic-divergence trust signal; ignored by FedAvg-style
+                defenses. None when the server has not provided one.
 
         Returns:
             aggregated_update: 1-D tensor, same shape as each element of `updates`.
@@ -77,7 +82,10 @@ class FedAvgDefense(Defense):
         data_sizes: List[float],
         round_num: int,
         device: torch.device,
+        probe_distributions: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        # FedAvg ignores semantic probe signals.
+        del probe_distributions
         if len(updates) == 0:
             raise ValueError("FedAvgDefense.aggregate received 0 updates")
 
@@ -164,6 +172,7 @@ class HMPGAEDefense(Defense):
         data_sizes: List[float],
         round_num: int,
         device: torch.device,
+        probe_distributions: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         if len(updates) == 0:
             raise ValueError("HMPGAEDefense.aggregate received 0 updates")
@@ -187,6 +196,7 @@ class HMPGAEDefense(Defense):
                 client_ids=client_ids,
                 data_sizes=data_sizes,
                 round_num=round_num,
+                probe_distributions=probe_distributions,
             )
         except Exception as e:  # noqa: BLE001 - runtime safety net
             # Numerical / shape issues: fall back silently to FedAvg so the FL

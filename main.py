@@ -208,6 +208,7 @@ def setup_experiment(config):
         num_clients=config['num_clients'],
         compute_classification_semantic_entropy=config.get(
             'eval_classification_semantic_entropy', True),
+        semantic_probe_size=int(config.get('semantic_probe_size', 64)),
     )
 
     # 6. Create Clients
@@ -1009,6 +1010,13 @@ def main(config_overrides: Optional[Dict] = None):
             'graph_weight': 1.0,
             # Secondary signal: learned A_hat residual (kicks in as encoder trains).
             'residual_weight_alpha': 0.3,
+            # Tertiary signal: per-sample semantic divergence on a fixed probe
+            # subset (Signal 3 in trust_scorer). Off (=0.0) reproduces the
+            # original geometry-only HMP-GAE; >0 enables the output-behavior
+            # signal that catches geometrically-stealthy hallucination attackers.
+            # When >0, the server forwards each client's softmax over a fixed
+            # probe set into the runtime; otherwise no probe forward is done.
+            'semantic_weight': 1.0,
             # Historical deviation disabled by default: benign clients learning
             # real features drift more than attackers stuck on a fixed mislabel
             # manifold, which can invert the signal. Re-enable with care.

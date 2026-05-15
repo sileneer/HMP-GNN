@@ -70,6 +70,11 @@ class HMPGAERuntime:
         self.graph_weight = float(self.cfg.get("graph_weight", 1.0))
         self.residual_weight_alpha = float(self.cfg.get("residual_weight_alpha", 0.3))
         self.hist_weight_beta = float(self.cfg.get("hist_weight_beta", 0.0))
+        # Per-sample semantic-divergence signal weight. Off by default (=0.0)
+        # so existing experiments reproduce bit-for-bit; enable with
+        # defense_config.semantic_weight > 0 once the server is forwarding a
+        # probe_distributions tensor.
+        self.semantic_weight = float(self.cfg.get("semantic_weight", 0.0))
         self.softmax_tau = float(self.cfg.get("softmax_tau", 0.1))
 
         # Trust-to-weight mapping:
@@ -97,6 +102,16 @@ class HMPGAERuntime:
         # k=1 → very smooth; k=2 → recommended; k=3 → near-binary.
         self.soft_reject_k = float(self.cfg.get("soft_reject_k", 2.0))
         self.keep_min = int(self.cfg.get("keep_min", 1))
+        # gate_signal: which suspicion signal drives the rejection gate.
+        #   'graph'    -> graph_residual_z only (backward compatible).
+        #   'combined' -> z-score(-trust.s), folds in all enabled signals.
+        # Auto-promoted to 'combined' when semantic_weight > 0 unless the user
+        # has explicitly set gate_signal in the config.
+        cfg_gate = self.cfg.get("gate_signal", None)
+        if cfg_gate is None:
+            self.gate_signal = "combined" if self.semantic_weight > 0.0 else "graph"
+        else:
+            self.gate_signal = str(cfg_gate)
         self.hist_ema_beta = float(self.cfg.get("hist_ema_beta", 0.9))
         self.proj_seed = int(self.cfg.get("random_proj_seed", 42))
         # Cold-start policy: Signal 1 (graph_residual from k-NN hypergraph)
@@ -190,6 +205,7 @@ class HMPGAERuntime:
         client_ids: List[int],
         data_sizes: List[float],
         round_num: int,
+        probe_distributions: "torch.Tensor | None" = None,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         t0 = time.perf_counter()
 
@@ -200,6 +216,21 @@ class HMPGAERuntime:
         updates_stack = self._stack_updates(updates)   # (N, d_update)
         hist_mat, has_hist = self._history_matrix(client_ids)
         Z_hist_arg = hist_mat if has_hist else None
+
+        # Probe distributions (N, K, C) for the semantic-divergence signal.
+        # When the server has not provided one, the trust scorer simply leaves
+        # sem_div = 0 and the combination falls back to graph + recon signals.
+        if probe_distributions is not None:
+            probe_arg = probe_distributions.detach().to(
+                device=self.device, dtype=torch.float32
+            )
+            if probe_arg.dim() != 3 or probe_arg.shape[0] != N:
+                raise ValueError(
+                    "probe_distributions must be (N, K, C) with matching N; "
+                    f"got {tuple(probe_arg.shape)} for N={N}"
+                )
+        else:
+            probe_arg = None
 
         # ---- 2) self-supervised training steps ---- #
         self.node_encoder.train()
@@ -270,6 +301,8 @@ class HMPGAERuntime:
                 residual_weight_alpha=self.residual_weight_alpha,
                 hist_weight_beta=self.hist_weight_beta,
                 softmax_tau=self.softmax_tau,
+                probe_distributions=probe_arg,
+                semantic_weight=self.semantic_weight,
             )
 
         # ---- 3b) Map trust signals to aggregation weights ---- #
@@ -293,17 +326,19 @@ class HMPGAERuntime:
             used_alpha = alpha_cold
             used_mode = "cold_start_fedavg"
         elif self.trust_mode == "soft_reject_fedavg":
-            # Soft sigmoid gate on graph_residual_z, then data-size FedAvg
-            # among the (continuously) trusted clients.  Robust to threshold
-            # miscalibration: suspicious clients are down-weighted, not zeroed.
+            # Soft sigmoid gate on the suspicion z-score selected by gate_signal,
+            # then data-size FedAvg among the (continuously) trusted clients.
+            # Robust to threshold miscalibration: suspicious clients are down-
+            # weighted, not zeroed.
             used_alpha = reject_soft_weighted(
                 trust=trust,
                 data_sizes=ds_tensor,
                 reject_z_threshold=self.reject_z_threshold,
                 soft_reject_k=self.soft_reject_k,
                 keep_min=self.keep_min,
+                gate_signal=self.gate_signal,
             )
-            used_mode = "soft_reject_fedavg"
+            used_mode = f"soft_reject_fedavg[{self.gate_signal}]"
         elif self.trust_mode == "reject_then_fedavg":
             # Hard binary rejection via z-score threshold, then data-size FedAvg.
             used_alpha = reject_then_weighted(
@@ -311,8 +346,9 @@ class HMPGAERuntime:
                 data_sizes=ds_tensor,
                 reject_z_threshold=self.reject_z_threshold,
                 keep_min=self.keep_min,
+                gate_signal=self.gate_signal,
             )
-            used_mode = "reject_then_fedavg"
+            used_mode = f"reject_then_fedavg[{self.gate_signal}]"
         else:
             # Pure softmax over trust logits.
             used_alpha = trust.alpha
@@ -337,6 +373,12 @@ class HMPGAERuntime:
             # primary driver of trust in V1.
             "residual": trust.graph_residual.detach().cpu().tolist(),
             "recon_residual": trust.recon_residual.detach().cpu().tolist(),
+            "sem_div": trust.sem_div.detach().cpu().tolist(),
+            "sem_div_z": trust.sem_div_z.detach().cpu().tolist(),
+            "graph_residual_z": trust.graph_residual_z.detach().cpu().tolist(),
+            "recon_residual_z": trust.recon_residual_z.detach().cpu().tolist(),
+            "semantic_weight": float(self.semantic_weight),
+            "gate_signal": str(self.gate_signal),
             "hist_dev": trust.hist_dev.detach().cpu().tolist(),
             "has_history": bool(has_hist),
             "cold_start_fallback_used": bool(use_cold_start_fallback),

@@ -19,7 +19,8 @@ class Server:
                 defense_method: str = 'fedavg',
                 defense_config: Optional[Dict[str, Any]] = None,
                 num_clients: Optional[int] = None,
-                compute_classification_semantic_entropy: bool = True):
+                compute_classification_semantic_entropy: bool = True,
+                semantic_probe_size: int = 64):
         self.global_model = copy.deepcopy(global_model)
         self.test_loader = test_loader
         self.total_rounds = total_rounds
@@ -55,6 +56,21 @@ class Server:
         self._current_round = 0
         self.compute_classification_semantic_entropy = bool(
             compute_classification_semantic_entropy)
+
+        # Fixed probe subset for the per-client semantic-divergence trust
+        # signal (Signal 3 in hmp_gae.trust_scorer). Built lazily on first
+        # request so that defenses that don't need it pay no cost. The probe
+        # batches are taken deterministically from the head of test_loader so
+        # they are identical across rounds.
+        self.semantic_probe_size = int(semantic_probe_size)
+        self._probe_batches: Optional[List[Dict[str, torch.Tensor]]] = None
+        # Whether the active defense actually consumes probe distributions.
+        # HMP-GAE will use them when defense_config.semantic_weight > 0.
+        sem_w = float((self.defense_config or {}).get('semantic_weight', 0.0))
+        self._needs_probe = (
+            self.defense_method in ('hmp_gae', 'hmpgae', 'hmp-gae')
+            and sem_w > 0.0
+        )
 
         # Track historical data
         self.history = {
@@ -281,7 +297,8 @@ class Server:
         return weights
 
     def aggregate_updates(self, updates: List[torch.Tensor],
-                          client_ids: List[int]) -> Dict:
+                          client_ids: List[int],
+                          probe_distributions: Optional[torch.Tensor] = None) -> Dict:
         # Store client_ids for similarity display
         self._current_client_ids = client_ids
         self._sorted_client_ids = client_ids
@@ -296,6 +313,7 @@ class Server:
             data_sizes=raw_weights,
             round_num=self._current_round,
             device=self.device,
+            probe_distributions=probe_distributions,
         )
         # Ensure aggregated update is on the server device with consistent dtype.
         aggregated_update = aggregated_update.to(device=self.device, dtype=updates[0].dtype)
@@ -411,6 +429,56 @@ class Server:
         """Backward-compatible wrapper; prefer evaluate_local_metrics."""
         acc, _ = self.evaluate_local_metrics(client)
         return acc
+
+    def _ensure_probe_batches(self) -> List[Dict[str, torch.Tensor]]:
+        """Lazily snapshot a fixed subset of test_loader for probing clients."""
+        if self._probe_batches is not None:
+            return self._probe_batches
+        target = max(1, self.semantic_probe_size)
+        batches: List[Dict[str, torch.Tensor]] = []
+        collected = 0
+        for batch in self.test_loader:
+            # Snapshot tensors on CPU to keep peak GPU memory bounded.
+            snapshot = {
+                'input_ids': batch['input_ids'].detach().cpu(),
+                'attention_mask': batch['attention_mask'].detach().cpu(),
+            }
+            batches.append(snapshot)
+            collected += int(snapshot['input_ids'].shape[0])
+            if collected >= target:
+                break
+        self._probe_batches = batches
+        return batches
+
+    def evaluate_local_probe_distribution(self, client) -> torch.Tensor:
+        """
+        Forward the client's local model over a fixed probe subset and return
+        the per-sample softmax probabilities.
+
+        Returns:
+            (K, C) tensor on CPU, where K = number of probe samples actually
+            taken (<= semantic_probe_size, capped by len(test_loader.dataset))
+            and C = num_labels.
+        """
+        batches = self._ensure_probe_batches()
+        moved = not getattr(client, '_model_on_gpu', False)
+        if moved:
+            client.model.to(self.device)
+            client._model_on_gpu = True
+        try:
+            client.model.eval()
+            rows: List[torch.Tensor] = []
+            with torch.no_grad():
+                for batch in batches:
+                    input_ids = batch['input_ids'].to(self.device)
+                    attention_mask = batch['attention_mask'].to(self.device)
+                    logits = client.model(input_ids, attention_mask)
+                    rows.append(F.softmax(logits, dim=-1).detach().cpu())
+            return torch.cat(rows, dim=0)
+        finally:
+            if moved:
+                client.model.cpu()
+                client._model_on_gpu = False
     
     def evaluate(self) -> float:
         """
@@ -588,8 +656,24 @@ class Server:
         # Ensure deterministic order of keys
         sorted_client_ids = sorted(final_updates.keys())
         final_update_list = [final_updates[cid] for cid in sorted_client_ids]
-        
-        aggregation_log = self.aggregate_updates(final_update_list, sorted_client_ids)
+
+        # Optional Phase 3.5: per-client probe forward for the semantic-divergence
+        # trust signal. Only computed when the active defense actually consumes it.
+        probe_tensor: Optional[torch.Tensor] = None
+        if self._needs_probe:
+            probe_rows: List[torch.Tensor] = []
+            for cid in sorted_client_ids:
+                client = self.client_dict.get(cid)
+                if client is None:
+                    raise KeyError(f"client_id {cid} not registered with server")
+                probe_rows.append(self.evaluate_local_probe_distribution(client))
+            # All rows must have identical shape (K, C) -- same probe set, same head.
+            probe_tensor = torch.stack(probe_rows, dim=0)  # (N, K, C)
+
+        aggregation_log = self.aggregate_updates(
+            final_update_list, sorted_client_ids,
+            probe_distributions=probe_tensor,
+        )
 
         # Evaluate the global model (compute accuracy, loss and CSE in one pass).
         clean_acc, global_loss, mean_cse = self.evaluate_with_loss()
