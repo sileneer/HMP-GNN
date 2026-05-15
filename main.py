@@ -980,7 +980,7 @@ def main(config_overrides: Optional[Dict] = None):
         # defense_method selects the server-side aggregation rule.
         #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
-        'defense_method': 'hmp_gae',
+        'defense_method': 'fedavg',
         'defense_config': {
             # --- Node features (eta_i) ---
             'proj_dim': 64,              # random-projection dim for flat update
