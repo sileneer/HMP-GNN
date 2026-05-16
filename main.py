@@ -877,16 +877,25 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # V1 primary experiment: HMP-GAE defense vs Hallucination attack.
-        # Setup: N=7 (5 benign + 2 attackers, 28.6% attack ratio), 50 rounds, Qwen2.5-0.5B + LoRA.
-        # For a FedAvg baseline comparison, run with override:
-        #     python -c "import main; main.main({'experiment_name':'fedavg_hallu_n7_r50_qwen','defense_method':'fedavg'})"
-        'experiment_name': 'hmpgae_hallu_n7_r50_qwen',
+        # === CURRENT RUN: no-attack ceiling baseline (7 benign clients) ===
+        # This is the "perfect-world" upper bound: 7 benign clients, no attackers,
+        # FedAvg aggregation (defense is irrelevant when there is nothing to defend
+        # against -- fedavg gives the cleanest reference).
+        #
+        # To switch back to the attack experiments, restore these four fields:
+        #   'experiment_name': 'hmpgae_hallu_n7_r50_qwen',  (or 'fedavg_hallu_n7_r50_qwen')
+        #   'num_attackers':   2,
+        #   'attack_method':   'Hallucination',
+        #   'defense_method':  'hmp_gae',                    (or 'fedavg')
+        # Equivalent one-liners:
+        #   python -c "import main; main.main({'experiment_name':'hmpgae_hallu_n7_r50_qwen','num_attackers':2,'attack_method':'Hallucination','defense_method':'hmp_gae'})"
+        #   python -c "import main; main.main({'experiment_name':'fedavg_hallu_n7_r50_qwen','num_attackers':2,'attack_method':'Hallucination','defense_method':'fedavg'})"
+        'experiment_name': 'noattack_n7_r50_qwen',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 7,    # Total clients: 5 benign + 2 attackers
-        'num_attackers': 2,  # Number of attacker clients (last num_attackers clients are attackers)
+        'num_clients': 7,    # Total clients (no attackers in this run -> all benign)
+        'num_attackers': 0,  # No attackers (set to 2 for the under-attack experiments)
         'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
@@ -955,7 +964,9 @@ def main(config_overrides: Optional[Dict] = None):
 
         # ========== Attack Configuration ==========
         # Supported: 'NoAttack' | 'Hallucination' (this paper) | 'SignFlipping' | 'Gaussian' | 'ALIE'
-        'attack_method': 'Hallucination',
+        # Current value is 'NoAttack' for the ceiling baseline.  Restore to 'Hallucination'
+        # when running the under-attack experiments (num_attackers must also be set > 0).
+        'attack_method': 'NoAttack',
         'attack_start_round': 0,  # Visualization-only marker: round where attackers activate
 
         # ---- Hallucination (label-flipping, this paper's attacker) ----
@@ -980,6 +991,9 @@ def main(config_overrides: Optional[Dict] = None):
         # defense_method selects the server-side aggregation rule.
         #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
+        # Current value is 'fedavg' for the no-attack ceiling run (defense is a no-op
+        # when there are no attackers).  Restore to 'hmp_gae' for the main HMP-GAE
+        # experiment, or keep 'fedavg' for the under-attack no-defense baseline.
         'defense_method': 'fedavg',
         'defense_config': {
             # --- Node features (eta_i) ---
@@ -1117,8 +1131,17 @@ def run_suite(
     Example (Colab notebook):
         run_suite(
             suite=[
-                {'experiment_name': 'hmpgae_hallu_n7_r50_qwen', 'defense_method': 'hmp_gae'},
-                {'experiment_name': 'fedavg_hallu_n7_r50_qwen',  'defense_method': 'fedavg'},
+                # No-attack ceiling: 7 benign clients, defense is a no-op (use fedavg).
+                # This is the "perfect-world" upper bound HMP-GAE is compared against.
+                {'experiment_name': 'noattack_n7_r50_qwen',
+                 'num_attackers': 0, 'attack_method': 'NoAttack',
+                 'defense_method': 'fedavg'},
+                # Under attack: FedAvg (no defense) -- shows attack damage.
+                {'experiment_name': 'fedavg_hallu_n7_r50_qwen',
+                 'defense_method': 'fedavg'},
+                # Under attack: HMP-GAE (full, with semantic signal).
+                {'experiment_name': 'hmpgae_hallu_n7_r50_qwen',
+                 'defense_method': 'hmp_gae'},
             ],
             base_overrides=COLAB_CONFIG_OVERRIDES,  # shared knobs, e.g. num_rounds=5 for a quick test
         )
