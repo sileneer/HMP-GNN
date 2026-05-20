@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -35,10 +35,15 @@ class FlippedLabelDataset(Dataset):
       - 'targeted'  : replace every flipped sample with a fixed target_class
       - 'random'    : replace with a uniformly random *other* class
 
-    Flipping is deterministic given `seed` and `flip_ratio`: we pre-compute
-    which sample indices get flipped once at construction time so that
+    Flipping is deterministic given `seed` and `flip_ratio`. By default the
+    flipped label set is pre-computed once at construction time so that
     (a) labels seen during training are stable across epochs and
     (b) the corruption is reproducible between runs.
+
+    Call ``regenerate(seed, flip_ratio)`` between rounds to draw a fresh
+    random flip pattern -- this is what HallucinationAttackerClient does when
+    per_round_reseed=True. ``__getitem__`` reads ``self.flipped_labels[idx]``
+    dynamically, so the DataLoader picks up the new labels without rebuilding.
     """
 
     def __init__(
@@ -64,14 +69,17 @@ class FlippedLabelDataset(Dataset):
         self.seed = int(seed)
 
         self.flipped_labels: List[int] = self._precompute_flipped_labels()
-        # Book-keeping for diagnostics
-        self.num_flipped: int = sum(
+        self.num_flipped: int = self._count_flipped()
+
+    def _count_flipped(self) -> int:
+        return sum(
             1
             for orig, new in zip(self.base.labels, self.flipped_labels)
             if int(orig) != int(new)
         )
 
     def _precompute_flipped_labels(self) -> List[int]:
+        """Sample a fresh flipped-label list using self.seed and self.flip_ratio."""
         n = len(self.base)
         rng = np.random.default_rng(self.seed)
         flip_mask = rng.random(n) < self.flip_ratio
@@ -83,6 +91,19 @@ class FlippedLabelDataset(Dataset):
             else:
                 out.append(orig)
         return out
+
+    def regenerate(self, seed: int, flip_ratio: Optional[float] = None) -> None:
+        """
+        Re-sample the flipped-label set with a new seed (and optionally a new
+        flip_ratio). Mutates self.flipped_labels and self.num_flipped in place.
+        Safe to call mid-training: the DataLoader's next __getitem__ will see
+        the new labels because we don't rebuild the underlying base dataset.
+        """
+        if flip_ratio is not None:
+            self.flip_ratio = float(flip_ratio)
+        self.seed = int(seed)
+        self.flipped_labels = self._precompute_flipped_labels()
+        self.num_flipped = self._count_flipped()
 
     def _apply_flip(self, orig: int, rng: np.random.Generator) -> int:
         if self.flip_mode == "pairwise":
@@ -148,6 +169,8 @@ class HallucinationAttackerClient(BenignClient):
         attack_start_round: int = 0,
         claimed_data_size: float = 1.0,
         flip_seed: Optional[int] = None,
+        per_round_reseed: bool = False,
+        flip_ratio_range: Optional[Tuple[float, float]] = None,
     ):
         super().__init__(
             client_id=client_id,
@@ -170,10 +193,33 @@ class HallucinationAttackerClient(BenignClient):
         self.target_class = target_class
         self._flip_seed = int(flip_seed if flip_seed is not None else client_id)
 
+        # ---- Per-round randomization options ---- #
+        # When per_round_reseed=True, prepare_for_round() draws a fresh seed
+        # for the flip dataset every round, so the set of flipped indices and
+        # the random targets vary round-to-round.  Combined with flip_ratio_range
+        # this also varies the fraction of flipped samples each round.
+        self.per_round_reseed = bool(per_round_reseed)
+        if flip_ratio_range is not None:
+            lo, hi = flip_ratio_range
+            if not (0.0 <= float(lo) <= float(hi) <= 1.0):
+                raise ValueError(
+                    f"flip_ratio_range must satisfy 0 <= lo <= hi <= 1; "
+                    f"got {flip_ratio_range!r}"
+                )
+            self.flip_ratio_range: Optional[Tuple[float, float]] = (
+                float(lo), float(hi)
+            )
+        else:
+            self.flip_ratio_range = None
+        # Dedicated RNG so the per-round flip_ratio sequence is reproducible
+        # given (client_id, flip_seed) and independent of any global RNG state.
+        self._round_rng = np.random.default_rng(self._flip_seed)
+
         # Keep a reference to the honest loader for pre-attack rounds.
         self._honest_loader: DataLoader = data_loader
 
-        # Build the flipped loader once (deterministic, shared across rounds).
+        # Build the flipped loader once (shared across rounds; the dataset
+        # itself is mutated in-place when per_round_reseed=True).
         base_dataset = data_loader.dataset
         flipped_dataset = FlippedLabelDataset(
             base_dataset=base_dataset,
@@ -189,18 +235,60 @@ class HallucinationAttackerClient(BenignClient):
             batch_size=data_loader.batch_size,
             shuffle=True,
         )
-        print(
-            f"  [Hallucination Attacker {client_id}] mode={self.flip_mode}, "
-            f"flip_ratio={self.flip_ratio:.2f}, "
-            f"flipped_samples={flipped_dataset.num_flipped}/{len(flipped_dataset)} "
-            f"(claimed_data_size={self.claimed_data_size:.0f})"
-        )
+        if self.per_round_reseed:
+            range_str = (
+                f"range={self.flip_ratio_range}"
+                if self.flip_ratio_range is not None
+                else f"fixed={self.flip_ratio:.2f}"
+            )
+            print(
+                f"  [Hallucination Attacker {client_id}] mode={self.flip_mode}, "
+                f"per_round_reseed=True, flip_ratio {range_str}, "
+                f"init flipped={flipped_dataset.num_flipped}/{len(flipped_dataset)} "
+                f"(claimed_data_size={self.claimed_data_size:.0f})"
+            )
+        else:
+            print(
+                f"  [Hallucination Attacker {client_id}] mode={self.flip_mode}, "
+                f"flip_ratio={self.flip_ratio:.2f}, "
+                f"flipped_samples={flipped_dataset.num_flipped}/{len(flipped_dataset)} "
+                f"(claimed_data_size={self.claimed_data_size:.0f})"
+            )
 
     # ----------------------------- life cycle ------------------------------ #
 
     def prepare_for_round(self, round_num: int) -> None:
-        """Server phase 1 hook. Hallucination attacker has nothing special to do."""
+        """
+        Server phase 1 hook. With per_round_reseed=False this is a pure
+        bookkeeping update; with per_round_reseed=True we resample the
+        flipped-label set (and optionally flip_ratio) so that the attacker's
+        gradient direction varies across rounds. This produces non-stationary
+        attack metrics (CSE / local_acc oscillate) which better reflects a
+        realistic attacker than a frozen wrong-label manifold.
+        """
         self.set_round(round_num)
+        if not self.per_round_reseed:
+            return
+        # Sample (or keep) flip_ratio for this round.
+        if self.flip_ratio_range is not None:
+            lo, hi = self.flip_ratio_range
+            ratio = float(self._round_rng.uniform(lo, hi))
+        else:
+            ratio = None  # keep current self.flip_ratio
+        # Round/client-distinct seed (large prime avoids low-bit collisions
+        # between (client_id, round_num) pairs that could pin two attackers
+        # to the same flipped-sample subset).
+        seed = self._flip_seed * 100_003 + int(round_num)
+        dataset = self._flipped_loader.dataset
+        dataset.regenerate(seed=seed, flip_ratio=ratio)
+        # Reflect the new flip_ratio on the client object for diagnostics.
+        if ratio is not None:
+            self.flip_ratio = ratio
+        print(
+            f"  [Hallucination Attacker {self.client_id}] round={round_num} "
+            f"re-flipped: flip_ratio={dataset.flip_ratio:.3f}, "
+            f"flipped_samples={dataset.num_flipped}/{len(dataset)}"
+        )
 
     def local_train(self, epochs: Optional[int] = None) -> torch.Tensor:
         """
