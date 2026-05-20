@@ -884,32 +884,34 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # === CURRENT RUN: HMP-GAE vs. per-round randomized Hallucination attacker ===
-        # FL setup is byte-aligned with the earlier 'hmpgae_hallu_n7_r50_qwen' run
-        # (same N=7, num_attackers=2, num_rounds=50, lr, batch, LoRA, Qwen2.5-0.5B,
-        # AG News, IID, defense_config including semantic_weight=1.0).
-        # The only difference is the attacker: instead of frozen 100% pairwise flip,
-        # each round it resamples (a) which samples get flipped (random subset),
-        # (b) the random target class per flipped sample, and (c) the flip_ratio
-        # itself from [0.3, 0.7].  This produces non-stationary attack gradients
-        # so the attacker's CSE / local_acc oscillate -- a much better stress test
-        # for HMP-GAE's per-sample semantic-divergence signal.
+        # === CURRENT RUN: HMP-GAE under NO-ATTACK (overhead / null-case probe) ===
+        # All 7 clients are benign; HMP-GAE still runs as the aggregation rule.
+        # Purpose: verify that under a clean federation HMP-GAE
+        #   (a) does not falsely down-weight any honest client (trust_weights
+        #       should stay roughly uniform across rounds), and
+        #   (b) matches the FedAvg ceiling on Clean Acc / CSE (no defense tax).
+        # FL setup is byte-aligned with the earlier attack runs
+        # ('hmpgae_hallu_randflip_n7_r50_qwen' etc.): same N=7, num_rounds=50,
+        # lr, batch, LoRA, Qwen2.5-0.5B, AG News, IID, defense_config
+        # (including semantic_weight=1.0).  Only attacker-side knobs changed.
         #
-        # Companion runs (change just 2 fields):
-        #   FedAvg under same randomized attack (no defense baseline):
-        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen', 'defense_method':'fedavg'}
-        #   No-attack ceiling (7 benign clients):
-        #     {'experiment_name':'noattack_n7_r50_qwen',
-        #      'num_attackers':0, 'attack_method':'NoAttack', 'defense_method':'fedavg'}
-        # To reproduce the *original* frozen 100% flip experiment instead, override:
-        #     {'hallu_flip_ratio':1.0, 'hallu_flip_mode':'pairwise',
-        #      'hallu_per_round_reseed':False, 'hallu_flip_ratio_range':None}
-        'experiment_name': 'hmpgae_hallu_randflip_n7_r50_qwen',
+        # Companion runs (change just a couple of fields):
+        #   FedAvg under no-attack (true ceiling, no defense overhead at all):
+        #     {'experiment_name':'noattack_fedavg_n7_r50_qwen',
+        #      'defense_method':'fedavg'}
+        #   Under attack: HMP-GAE vs per-round randomized Hallucination attacker:
+        #     {'experiment_name':'hmpgae_hallu_randflip_n7_r50_qwen',
+        #      'num_attackers':2, 'attack_method':'Hallucination'}
+        #   FedAvg under the same attack (no-defense baseline):
+        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen',
+        #      'num_attackers':2, 'attack_method':'Hallucination',
+        #      'defense_method':'fedavg'}
+        'experiment_name': 'hmpgae_noattack_n7_r50_qwen',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 7,    # Total clients: 5 benign + 2 attackers
-        'num_attackers': 2,  # Number of attacker clients (last num_attackers clients are attackers)
+        'num_clients': 7,    # Total clients: all 7 benign in this run
+        'num_attackers': 0,  # No attackers; HMP-GAE runs as the aggregation rule
         'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
@@ -978,11 +980,12 @@ def main(config_overrides: Optional[Dict] = None):
 
         # ========== Attack Configuration ==========
         # Supported: 'NoAttack' | 'Hallucination' (this paper) | 'SignFlipping' | 'Gaussian' | 'ALIE'
-        # Current value is 'Hallucination' (paired with the per-round randomized
-        # attacker variant; see the hallu_* block below).  Set to 'NoAttack' and
-        # num_attackers=0 to run the ceiling baseline.
-        'attack_method': 'Hallucination',
-        'attack_start_round': 0,  # Visualization-only marker: round where attackers activate
+        # Current value is 'NoAttack' (paired with num_attackers=0).  The hallu_*
+        # / classical-baseline blocks below are inert in this mode but kept so
+        # companion attack runs only need to override `num_attackers` and
+        # `attack_method`.
+        'attack_method': 'NoAttack',
+        'attack_start_round': None,  # Visualization-only marker; no attackers this run
 
         # ---- Hallucination (label-flipping, this paper's attacker) ----
         # Matches the paper's stealth threat model: ||omega_a - omega'_a|| <= eps is
@@ -1017,9 +1020,10 @@ def main(config_overrides: Optional[Dict] = None):
         # defense_method selects the server-side aggregation rule.
         #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
-        # Current value is 'hmp_gae' for the main attack experiment.  Use 'fedavg'
-        # for the no-defense baseline (companion run); 'fedavg' is also the right
-        # choice when there are no attackers (ceiling run).
+        # Current value is 'hmp_gae'.  In this no-attack run HMP-GAE acts as a
+        # null-case probe: we want trust_weights to remain near-uniform and
+        # Clean Acc / CSE to match a plain FedAvg run (no defense tax).  Switch
+        # to 'fedavg' for the explicit no-defense ceiling.
         'defense_method': 'hmp_gae',
         'defense_config': {
             # --- Node features (eta_i) ---
