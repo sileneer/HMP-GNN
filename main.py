@@ -922,34 +922,40 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # === CURRENT RUN: HMP-GAE under NO-ATTACK (overhead / null-case probe) ===
-        # All 7 clients are benign; HMP-GAE still runs as the aggregation rule.
-        # Purpose: verify that under a clean federation HMP-GAE
-        #   (a) does not falsely down-weight any honest client (trust_weights
-        #       should stay roughly uniform across rounds), and
-        #   (b) matches the FedAvg ceiling on Clean Acc / CSE (no defense tax).
-        # FL setup is byte-aligned with the earlier attack runs
-        # ('hmpgae_hallu_randflip_n7_r50_qwen' etc.): same N=7, num_rounds=50,
-        # lr, batch, LoRA, Qwen2.5-0.5B, AG News, IID, defense_config
-        # (including semantic_weight=1.0).  Only attacker-side knobs changed.
+        # === CURRENT RUN: FedAvg under Hallucination attack (no-defense baseline) ===
+        # 5 benign clients + 2 attackers (last 2 client IDs); standard FedAvg aggregation.
+        # Purpose: lower-bound reference in the attack/defense comparison:
+        #   (a) without any defense, how much does the per-round randomized
+        #       Hallucination attack degrade Clean Acc / inflate CSE?
+        #   (b) HMP-GAE under the same attack should recover toward the
+        #       no-attack ceiling.
+        # FL setup is byte-aligned with the HMP-GAE attack run
+        # ('hmpgae_hallu_randflip_n7_r50_qwen'): same N=7, num_rounds=50,
+        # lr, batch, LoRA, Qwen2.5-0.5B, AG News, IID, attack hyperparameters
+        # (per-round reseed, flip_ratio sampled from [0.3, 0.8], random target).
+        # Aligned with HMP_GAE_Colab_FedAvg.ipynb so `python main.py` and the
+        # notebook produce identical results.
         #
         # Companion runs (change just a couple of fields):
-        #   FedAvg under no-attack (true ceiling, no defense overhead at all):
+        #   No-attack ceilings:
         #     {'experiment_name':'noattack_fedavg_n7_r50_qwen',
-        #      'defense_method':'fedavg'}
-        #   Under attack: HMP-GAE vs per-round randomized Hallucination attacker:
+        #      'num_attackers':0, 'attack_method':'NoAttack'}
+        #     {'experiment_name':'hmpgae_noattack_n7_r50_qwen',
+        #      'num_attackers':0, 'attack_method':'NoAttack',
+        #      'defense_method':'hmp_gae'}
+        #   HMP-GAE under the same attack (this paper's main result):
         #     {'experiment_name':'hmpgae_hallu_randflip_n7_r50_qwen',
-        #      'num_attackers':2, 'attack_method':'Hallucination'}
-        #   FedAvg under the same attack (no-defense baseline):
-        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen',
-        #      'num_attackers':2, 'attack_method':'Hallucination',
-        #      'defense_method':'fedavg'}
-        'experiment_name': 'hmpgae_noattack_n7_r50_qwen',
+        #      'defense_method':'hmp_gae'}
+        #   HMP-GAE geometry-only ablation:
+        #     {'experiment_name':'hmpgae_geomonly_hallu_randflip_n7_r50_qwen',
+        #      'defense_method':'hmp_gae',
+        #      'defense_config':{...'semantic_weight':0.0...}}
+        'experiment_name': 'fedavg_hallu_randflip_n7_r50_qwen',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 7,    # Total clients: all 7 benign in this run
-        'num_attackers': 0,  # No attackers; HMP-GAE runs as the aggregation rule
+        'num_clients': 7,    # Total clients: 5 benign + 2 attackers
+        'num_attackers': 2,  # Last 2 client IDs are Hallucination attackers
         'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
@@ -1018,12 +1024,12 @@ def main(config_overrides: Optional[Dict] = None):
 
         # ========== Attack Configuration ==========
         # Supported: 'NoAttack' | 'Hallucination' (this paper) | 'SignFlipping' | 'Gaussian' | 'ALIE'
-        # Current value is 'NoAttack' (paired with num_attackers=0).  The hallu_*
-        # / classical-baseline blocks below are inert in this mode but kept so
-        # companion attack runs only need to override `num_attackers` and
-        # `attack_method`.
-        'attack_method': 'NoAttack',
-        'attack_start_round': None,  # Visualization-only marker; no attackers this run
+        # Current value is 'Hallucination' (paired with num_attackers=2): the
+        # proposed per-round randomized label-flipping attack. Switch to
+        # 'NoAttack' (with num_attackers=0) for the clean ceiling, or to one
+        # of the classical-baseline strings for V2 comparison runs.
+        'attack_method': 'Hallucination',
+        'attack_start_round': None,  # None = attack active from round 0 (default)
 
         # ---- Hallucination (label-flipping, this paper's attacker) ----
         # Matches the paper's stealth threat model: ||omega_a - omega'_a|| <= eps is
@@ -1056,13 +1062,12 @@ def main(config_overrides: Optional[Dict] = None):
 
         # ========== Defense Configuration (V1: fedavg | hmp_gae) ==========
         # defense_method selects the server-side aggregation rule.
-        #   'fedavg'  — standard data-size-weighted FedAvg (baseline, matches pre-plugin behavior)
+        #   'fedavg'  — standard data-size-weighted FedAvg (no-defense baseline)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
-        # Current value is 'hmp_gae'.  In this no-attack run HMP-GAE acts as a
-        # null-case probe: we want trust_weights to remain near-uniform and
-        # Clean Acc / CSE to match a plain FedAvg run (no defense tax).  Switch
-        # to 'fedavg' for the explicit no-defense ceiling.
-        'defense_method': 'hmp_gae',
+        # Current value is 'fedavg': the explicit no-defense baseline against
+        # which HMP-GAE is compared under the same Hallucination attack. Switch
+        # to 'hmp_gae' for the proposed defense run (matches main paper result).
+        'defense_method': 'fedavg',
         'defense_config': {
             # --- Node features (eta_i) ---
             'proj_dim': 64,              # random-projection dim for flat update
