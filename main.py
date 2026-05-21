@@ -21,6 +21,11 @@ from client import BenignClient
 from server import Server
 from visualization import ExperimentVisualizer
 from fed_checkpoint import save_global_model_checkpoint
+from fed_resume import (
+    apply_round_checkpoint,
+    load_round_checkpoint,
+    save_round_checkpoint,
+)
 
 warnings.filterwarnings('ignore')
 
@@ -498,15 +503,6 @@ def run_downstream_task2_if_configured(config: Dict, results_dir: Path) -> None:
 def run_experiment(config):
     server, results_dir = setup_experiment(config)
 
-    # Initial evaluation
-    print("\nEvaluating initial model...")
-    initial_clean = server.evaluate()
-    print(f"Initial Performance - Clean Accuracy: {initial_clean:.4f}")
-
-    print("\n" + "=" * 50)
-    print("Starting Federated Learning Rounds")
-    print("=" * 50)
-
     progressive_metrics = {
         'rounds': [],
         'clean_acc': [],
@@ -516,8 +512,35 @@ def run_experiment(config):
         'cse': [],
     }
 
+    # ------------------------------------------------------------------
+    # Resume from a previously-saved per-round checkpoint, if available.
+    # On Colab the runtime can die at any time; this lets a re-launched
+    # run pick up where it left off without re-doing completed rounds.
+    # See fed_resume.py for the persisted state and fingerprint guard.
+    # ------------------------------------------------------------------
+    ckpt_subdir = config.get('round_checkpoint_subdir', 'round_checkpoint')
+    payload, reason = load_round_checkpoint(config, results_dir, subdir=ckpt_subdir)
+    start_round = 0
+    if payload is not None:
+        start_round = apply_round_checkpoint(server, progressive_metrics, payload)
+        print(f"\n[resume] {reason}")
+        if start_round >= config['num_rounds']:
+            print(f"[resume] All {config['num_rounds']} rounds already completed; skipping FL loop.")
+    elif reason:
+        print(f"\n[resume] Starting fresh ({reason}).")
+
+    # Initial evaluation (skipped on resume — server.history already has it).
+    if start_round == 0:
+        print("\nEvaluating initial model...")
+        initial_clean = server.evaluate()
+        print(f"Initial Performance - Clean Accuracy: {initial_clean:.4f}")
+
+    print("\n" + "=" * 50)
+    print("Starting Federated Learning Rounds")
+    print("=" * 50)
+
     try:
-        for round_num in range(config['num_rounds']):
+        for round_num in range(start_round, config['num_rounds']):
             round_log = server.run_round(round_num)
 
             # Track metrics
@@ -526,7 +549,21 @@ def run_experiment(config):
             progressive_metrics['acc_diff'].append(round_log.get('acc_diff', 0.0))
             progressive_metrics['agg_update_norm'].append(round_log['aggregation'].get('aggregated_update_norm', 0.0))
             progressive_metrics['cse'].append(round_log.get('classification_semantic_entropy'))
-            
+
+            # Persist a resumable snapshot.  Atomic write (.tmp + os.replace)
+            # so a kill mid-save leaves the previous good checkpoint intact.
+            try:
+                save_round_checkpoint(
+                    server=server,
+                    progressive_metrics=progressive_metrics,
+                    config=config,
+                    results_dir=results_dir,
+                    next_round=round_num + 1,
+                    subdir=ckpt_subdir,
+                )
+            except Exception as e:  # noqa: BLE001 — never let checkpointing kill training
+                print(f"  [resume] Warning: checkpoint save failed: {type(e).__name__}: {e}")
+
             # Memory cleanup after each round
             gc.collect()
             if torch.cuda.is_available():
@@ -1105,6 +1142,20 @@ def main(config_overrides: Optional[Dict] = None):
         # ========== Global checkpoint (for downstream generation / transfer experiments) ==========
         'save_global_checkpoint': True,  # True: save server.global_model after FL under results_dir/global_checkpoint_subdir
         'global_checkpoint_subdir': 'global_checkpoint',  # Subfolder name under results/ (same run uses results_dir from setup)
+
+        # ========== Per-round checkpoint (Colab resilience) ==========
+        # After every round the FL loop atomically writes a compact snapshot
+        # (global flat params + server history + defense state + RNG) to
+        # results/<round_checkpoint_subdir>/checkpoint_last.pt.  On the next
+        # launch run_experiment looks for it and, if the run fingerprint
+        # matches, resumes from the next round — so a Colab disconnect costs
+        # at most the in-flight round.  Overhead is one torch.save of a few
+        # MB per round (LoRA-only), << 1% of a round's wall time.
+        # Set resume_from_checkpoint=False to force a fresh run; set
+        # save_round_checkpoint=False to disable the periodic save entirely.
+        'save_round_checkpoint': True,
+        'resume_from_checkpoint': True,
+        'round_checkpoint_subdir': 'round_checkpoint',
         # ========== Task 2: optional downstream causal generation (same run as FL) ==========
         # V1 first experiment has PPL + CSE as hallucination metrics already; Task 2 generation is
         # additional explanatory output. Keep off for a faster first run (saves ~2-3 min); switch

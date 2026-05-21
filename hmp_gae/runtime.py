@@ -394,3 +394,30 @@ class HMPGAERuntime:
         # package strips this key before logging).
         stats["Z"] = Z.detach().cpu().numpy()
         return aggregated.detach().cpu(), stats
+
+    # --------------------------------------------------------------------- #
+    # Checkpoint helpers (for resumable FL runs)                            #
+    # --------------------------------------------------------------------- #
+    # Serialize / restore all state that changes across rounds: the three
+    # trained sub-modules (node_encoder, hmp_encoder, hyperedge_decoder),
+    # the Adam optimizer, and the EMA latent cache z_hist.  The fixed random
+    # projection and all hyperparameters are reconstructed deterministically
+    # from config + random_proj_seed at __init__, so they are not stored.
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "node_encoder": self.node_encoder.state_dict(),
+            "hmp_encoder": self.hmp_encoder.state_dict(),
+            "hyperedge_decoder": self.hyperedge_decoder.state_dict(),
+            "optim": self.optim.state_dict(),
+            "z_hist": {int(k): v.detach().cpu().clone()
+                       for k, v in self.z_hist.items()},
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        self.node_encoder.load_state_dict(state["node_encoder"])
+        self.hmp_encoder.load_state_dict(state["hmp_encoder"])
+        self.hyperedge_decoder.load_state_dict(state["hyperedge_decoder"])
+        self.optim.load_state_dict(state["optim"])
+        self.z_hist = {int(k): v.detach().clone()
+                       for k, v in (state.get("z_hist") or {}).items()}

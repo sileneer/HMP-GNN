@@ -107,6 +107,14 @@ class FedAvgDefense(Defense):
         }
         return aggregated_update, stats
 
+    # FedAvg has no cross-round state; checkpoint hooks are no-ops so the
+    # resume layer can call them uniformly across defenses.
+    def state_dict(self) -> Dict[str, Any]:
+        return {}
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # HMP-GAE defense                                                             #
@@ -151,6 +159,10 @@ class HMPGAEDefense(Defense):
         self._initialized = False
         self._hmp_runtime = None
         self._fallback = FedAvgDefense()
+        # Optional cached state from a checkpoint load that happened before
+        # the first aggregate() call (runtime not yet constructed).  Applied
+        # by _lazy_init once the runtime exists.
+        self._pending_state: Optional[Dict[str, Any]] = None
 
     def _lazy_init(self, flat_update_dim: int, device: torch.device) -> None:
         # Import lazily so that importing this package stays cheap when only
@@ -164,6 +176,9 @@ class HMPGAEDefense(Defense):
             device=device,
         )
         self._initialized = True
+        if self._pending_state is not None:
+            self._hmp_runtime.load_state_dict(self._pending_state)
+            self._pending_state = None
 
     def aggregate(
         self,
@@ -216,6 +231,28 @@ class HMPGAEDefense(Defense):
         agg = agg_cpu.to(device=device, dtype=updates[0].dtype)
         stats["defense_name"] = self.name
         return agg, stats
+
+    def state_dict(self) -> Dict[str, Any]:
+        # Pre-aggregation, the runtime hasn't been built yet — nothing to save.
+        if not self._initialized or self._hmp_runtime is None:
+            return {"initialized": False}
+        return {
+            "initialized": True,
+            "runtime": self._hmp_runtime.state_dict(),
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        if not state or not state.get("initialized"):
+            return
+        # We need flat_update_dim to build the runtime.  Defer the actual
+        # parameter load until the runtime exists; in practice load is called
+        # right after construction and before the first aggregate(), so the
+        # flat dim isn't known yet.  Cache the payload and let _lazy_init
+        # consume it on the first aggregate() call.
+        self._pending_state = state["runtime"]
+        if self._initialized and self._hmp_runtime is not None:
+            self._hmp_runtime.load_state_dict(self._pending_state)
+            self._pending_state = None
 
 
 def build_defense(
