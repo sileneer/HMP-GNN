@@ -220,12 +220,23 @@ def setup_experiment(config):
     # 6. Create Clients
     print("\nCreating federated learning clients...")
     num_attackers = config.get('num_attackers', 0)  # Allow 0 attackers for baseline experiment
-    
+    attack_method = config.get('attack_method', 'Hallucination')
+
+    # 'NoAttack' is a first-class no-op: it forces every client to be benign even
+    # when num_attackers>0, so the (num_attackers=2, attack_method='NoAttack')
+    # combo from notebook overrides doesn't fall through the attacker dispatch.
+    if attack_method == 'NoAttack' and num_attackers > 0:
+        print(f"  [config] attack_method='NoAttack' overrides num_attackers={num_attackers}: "
+              f"all {config['num_clients']} clients will be benign.")
+        effective_num_attackers = 0
+    else:
+        effective_num_attackers = num_attackers
+
     for client_id in range(config['num_clients']):
         # Determine if benign or attacker
-        # Logic: Last 'num_attackers' clients are attackers
-        # If num_attackers=0, all clients are benign (baseline experiment)
-        if client_id < (config['num_clients'] - num_attackers):
+        # Logic: Last 'effective_num_attackers' clients are attackers
+        # If effective_num_attackers=0, all clients are benign (baseline experiment)
+        if client_id < (config['num_clients'] - effective_num_attackers):
             # --- Benign Client ---
             client_texts = [data_manager.train_texts[i] for i in client_indices[client_id]]
             client_labels = [data_manager.train_labels[i] for i in client_indices[client_id]]
@@ -249,7 +260,7 @@ def setup_experiment(config):
             )
         else:
             # --- Attacker Client ---
-            attack_method = config.get('attack_method', 'Hallucination')
+            # attack_method is resolved once before the loop above.
             # Use the actual assigned data size as claimed size (realistic scenario:
             # attackers do not exaggerate their contribution weight).
             claimed_data_size = len(client_indices[client_id])
@@ -816,10 +827,53 @@ def print_detailed_statistics(server_log_data, progressive_metrics, local_accura
         std_acc = np.std(acc_values) if len(acc_values) > 1 else 0.0
         row += f"{mean_acc:<6.6f} | {std_acc:.6f}"
         print(row)
-    
+
     print("-" * 80)
-    
-    # ========== 4. Save to CSV files for easy import ==========
+
+    # ========== 4. Aggregate Averages (across ALL rounds) ==========
+    # Three headline numbers for cross-run comparison:
+    #   - global model Clean Accuracy averaged over all rounds
+    #   - benign clients' local accuracy averaged over (round × benign client) pairs
+    #   - attacker clients' local accuracy averaged over (round × attacker client) pairs
+    # The benign/attacker splits use per-round local_accuracies logged by the server.
+    print("\n" + "-" * 80)
+    print("4️⃣  AGGREGATE AVERAGES (across all rounds)")
+    print("-" * 80)
+
+    global_mean = float(np.mean(clean_acc)) if clean_acc else 0.0
+    global_std = float(np.std(clean_acc)) if len(clean_acc) > 1 else 0.0
+
+    benign_vals = []
+    attacker_vals = []
+    for log in server_log_data:
+        for cid, acc in log.get('local_accuracies', {}).items():
+            if cid in attacker_ids_set:
+                attacker_vals.append(acc)
+            else:
+                benign_vals.append(acc)
+
+    benign_mean = float(np.mean(benign_vals)) if benign_vals else 0.0
+    benign_std = float(np.std(benign_vals)) if len(benign_vals) > 1 else 0.0
+    attacker_mean = float(np.mean(attacker_vals)) if attacker_vals else 0.0
+    attacker_std = float(np.std(attacker_vals)) if len(attacker_vals) > 1 else 0.0
+
+    seen_clients = set(all_client_ids)
+    n_attackers = len(attacker_ids_set & seen_clients)
+    n_benign = len(seen_clients) - n_attackers
+    n_rounds = len(server_log_data)
+
+    print(f"Global model Clean Accuracy        (mean over {len(clean_acc)} rounds): "
+          f"{global_mean:.6f}  ± {global_std:.6f}")
+    print(f"Benign clients Local Accuracy      (mean over {n_benign} benign × {n_rounds} rounds = {len(benign_vals)} values): "
+          f"{benign_mean:.6f}  ± {benign_std:.6f}")
+    if n_attackers > 0:
+        print(f"Attacker clients Local Accuracy   (mean over {n_attackers} attacker × {n_rounds} rounds = {len(attacker_vals)} values): "
+              f"{attacker_mean:.6f}  ± {attacker_std:.6f}")
+    else:
+        print("Attacker clients Local Accuracy:    N/A (no attackers configured)")
+    print("-" * 80)
+
+    # ========== 5. Save to CSV files for easy import ==========
     print("\n" + "-" * 80)
     print("💾 SAVING DATA TO CSV FILES FOR EASY COLLECTION")
     print("-" * 80)
@@ -894,7 +948,20 @@ def print_detailed_statistics(server_log_data, progressive_metrics, local_accura
             row.extend([f"{mean_acc:.6f}", f"{std_acc:.6f}"])
             writer.writerow(row)
     print(f"✅ Local Accuracy saved to: {csv_path3}")
-    
+
+    # Save Aggregate Averages (the three headline numbers from section 4)
+    csv_path4 = results_dir / f"{experiment_name}_aggregate_averages.csv"
+    with open(csv_path4, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Metric', 'Mean', 'Std', 'N_values'])
+        writer.writerow(['Global_Clean_Accuracy', f"{global_mean:.6f}", f"{global_std:.6f}", len(clean_acc)])
+        writer.writerow(['Benign_Local_Accuracy', f"{benign_mean:.6f}", f"{benign_std:.6f}", len(benign_vals)])
+        if n_attackers > 0:
+            writer.writerow(['Attacker_Local_Accuracy', f"{attacker_mean:.6f}", f"{attacker_std:.6f}", len(attacker_vals)])
+        else:
+            writer.writerow(['Attacker_Local_Accuracy', 'N/A', 'N/A', 0])
+    print(f"✅ Aggregate Averages saved to: {csv_path4}")
+
     print("\n" + "=" * 80)
     print("✅ All statistics printed and saved to CSV files!")
     print("   You can now easily collect data from multiple runs and compare them.")
@@ -1175,9 +1242,10 @@ def main(config_overrides: Optional[Dict] = None):
     if config_overrides:
         config.update(config_overrides)
 
-    # Run experiment (attack if num_attackers > 0, baseline if num_attackers == 0)
-    if config.get('num_attackers', 0) > 0:
-        attack_method = config.get('attack_method', 'Hallucination')
+    # Run experiment (attack if num_attackers > 0 AND attack_method != 'NoAttack',
+    # otherwise baseline). 'NoAttack' overrides num_attackers (see setup_experiment).
+    attack_method = config.get('attack_method', 'Hallucination')
+    if config.get('num_attackers', 0) > 0 and attack_method != 'NoAttack':
         if attack_method == 'Hallucination':
             print("Running Hallucination Attack (label-flipping, this paper)...")
         elif attack_method == 'ALIE':
