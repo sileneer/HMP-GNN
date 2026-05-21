@@ -20,7 +20,8 @@ class Server:
                 defense_config: Optional[Dict[str, Any]] = None,
                 num_clients: Optional[int] = None,
                 compute_classification_semantic_entropy: bool = True,
-                semantic_probe_size: int = 64):
+                semantic_probe_size: int = 64,
+                eval_local_every_n_rounds: int = 1):
         self.global_model = copy.deepcopy(global_model)
         self.test_loader = test_loader
         self.total_rounds = total_rounds
@@ -31,9 +32,24 @@ class Server:
         else:
             self.device = torch.device('cpu')
         self.global_model.to(self.device)
+        # Shared GPU-resident model used to evaluate each client's local
+        # metrics and probe distribution. We swap the client's flat trainable
+        # params into this model (cheap: a few MB for LoRA) instead of moving
+        # the entire ~2GB Qwen base back and forth between CPU and GPU per
+        # client per round. Frozen base weights here are bit-identical to
+        # those held by every client (same HF load, same seed, same arch).
+        self._eval_model = copy.deepcopy(global_model)
+        self._eval_model.to(self.device)
         self.clients = []
         self.client_dict = {}  # client_id -> client mapping for O(1) lookup
         self.log_data = []
+
+        # Frequency of per-client local accuracy / CSE evaluation. Default 1
+        # (every round, current behavior). Set >1 to evaluate only on round 0,
+        # the final round, and every n-th round in between -- a sparser
+        # diagnostic trace in exchange for ~75% saving on local-eval forwards
+        # (LoRA mode: ~10% of total round wall-clock).
+        self.eval_local_every_n_rounds = max(1, int(eval_local_every_n_rounds))
 
         # Server parameters
         self.server_lr = server_lr  # Server learning rate
@@ -387,42 +403,42 @@ class Server:
         the local model as w_global + Δ_i.  In this simulation the two are
         equivalent because client.model == w_global + Δ_i after local_train().
         Using the server's public test set is inherent to FedLLMs evaluation.
+
+        Implementation: instead of moving client.model (full ~2GB Qwen) between
+        CPU and GPU, we copy only the trainable flat params into the shared
+        GPU-resident self._eval_model. In LoRA mode this is a few-MB tensor
+        copy; in Full-FT mode it's equivalent to the old .to() call. The
+        client's own model object is untouched.
         """
-        model_was_on_cpu = not getattr(client, '_model_on_gpu', False)
-        if model_was_on_cpu:
-            client.model.to(self.device)
-            client._model_on_gpu = True
+        # client.model lives on CPU between rounds; get_flat_params returns
+        # a CPU tensor of just the trainable surface (LoRA-only with use_lora=True).
+        flat = client.model.get_flat_params()
+        self._eval_model.set_flat_params(flat)
+        self._eval_model.eval()
 
-        try:
-            client.model.eval()
-            correct = 0
-            total = 0
-            total_cse = 0.0
+        correct = 0
+        total = 0
+        total_cse = 0.0
 
-            with torch.no_grad():
-                for batch in self.test_loader:
-                    input_ids = batch['input_ids'].to(self.device)
-                    attention_mask = batch['attention_mask'].to(self.device)
-                    labels = batch['labels'].to(self.device)
+        with torch.no_grad():
+            for batch in self.test_loader:
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
 
-                    outputs = client.model(input_ids, attention_mask)
+                outputs = self._eval_model(input_ids, attention_mask)
 
-                    predictions = torch.argmax(outputs, dim=1)
-                    correct += (predictions == labels).sum().item()
-                    total += labels.size(0)
+                predictions = torch.argmax(outputs, dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
 
-                    log_probs = F.log_softmax(outputs, dim=1)
-                    probs = log_probs.exp()
-                    batch_cse = -(probs * log_probs).sum(dim=1)
-                    total_cse += batch_cse.sum().item()
+                log_probs = F.log_softmax(outputs, dim=1)
+                probs = log_probs.exp()
+                batch_cse = -(probs * log_probs).sum(dim=1)
+                total_cse += batch_cse.sum().item()
 
-            accuracy = correct / total if total > 0 else 0.0
-            cse = total_cse / total if total > 0 else 0.0
-        finally:
-            if model_was_on_cpu:
-                client.model.cpu()
-                client._model_on_gpu = False
-
+        accuracy = correct / total if total > 0 else 0.0
+        cse = total_cse / total if total > 0 else 0.0
         return accuracy, cse
 
     def evaluate_local_accuracy(self, client) -> float:
@@ -459,26 +475,21 @@ class Server:
             (K, C) tensor on CPU, where K = number of probe samples actually
             taken (<= semantic_probe_size, capped by len(test_loader.dataset))
             and C = num_labels.
+
+        Uses the shared GPU-resident self._eval_model (see evaluate_local_metrics).
         """
         batches = self._ensure_probe_batches()
-        moved = not getattr(client, '_model_on_gpu', False)
-        if moved:
-            client.model.to(self.device)
-            client._model_on_gpu = True
-        try:
-            client.model.eval()
-            rows: List[torch.Tensor] = []
-            with torch.no_grad():
-                for batch in batches:
-                    input_ids = batch['input_ids'].to(self.device)
-                    attention_mask = batch['attention_mask'].to(self.device)
-                    logits = client.model(input_ids, attention_mask)
-                    rows.append(F.softmax(logits, dim=-1).detach().cpu())
-            return torch.cat(rows, dim=0)
-        finally:
-            if moved:
-                client.model.cpu()
-                client._model_on_gpu = False
+        flat = client.model.get_flat_params()
+        self._eval_model.set_flat_params(flat)
+        self._eval_model.eval()
+        rows: List[torch.Tensor] = []
+        with torch.no_grad():
+            for batch in batches:
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                logits = self._eval_model(input_ids, attention_mask)
+                rows.append(F.softmax(logits, dim=-1).detach().cpu())
+        return torch.cat(rows, dim=0)
     
     def evaluate(self) -> float:
         """
@@ -679,23 +690,38 @@ class Server:
         clean_acc, global_loss, mean_cse = self.evaluate_with_loss()
 
         # Evaluate per-client local accuracy and CSE (single forward pass each).
+        # When eval_local_every_n_rounds > 1, we only evaluate on round 0, the
+        # final round, and every n-th round in between -- a sparser diagnostic
+        # trace in exchange for ~75% fewer N-times-test-set forwards.
+        n_eval = self.eval_local_every_n_rounds
+        is_final_round = (round_num + 1) == self.total_rounds
+        do_local_eval = (
+            n_eval <= 1
+            or round_num == 0
+            or is_final_round
+            or ((round_num + 1) % n_eval == 0)
+        )
         local_accs_this_round = {}
         local_cse_this_round = {}
-        for client in self.clients:
-            try:
-                local_acc, local_cse = self.evaluate_local_metrics(client)
-                local_accs_this_round[client.client_id] = local_acc
-                local_cse_this_round[client.client_id] = local_cse
+        if do_local_eval:
+            for client in self.clients:
+                try:
+                    local_acc, local_cse = self.evaluate_local_metrics(client)
+                    local_accs_this_round[client.client_id] = local_acc
+                    local_cse_this_round[client.client_id] = local_cse
 
-                if client.client_id not in self.history['local_accuracies']:
-                    self.history['local_accuracies'][client.client_id] = []
-                self.history['local_accuracies'][client.client_id].append(local_acc)
+                    if client.client_id not in self.history['local_accuracies']:
+                        self.history['local_accuracies'][client.client_id] = []
+                    self.history['local_accuracies'][client.client_id].append(local_acc)
 
-                if client.client_id not in self.history['local_cse']:
-                    self.history['local_cse'][client.client_id] = []
-                self.history['local_cse'][client.client_id].append(local_cse)
-            except Exception as e:
-                print(f"  ⚠️  Could not evaluate local metrics for client {client.client_id}: {e}")
+                    if client.client_id not in self.history['local_cse']:
+                        self.history['local_cse'][client.client_id] = []
+                    self.history['local_cse'][client.client_id].append(local_cse)
+                except Exception as e:
+                    print(f"  ⚠️  Could not evaluate local metrics for client {client.client_id}: {e}")
+        else:
+            print(f"  ⏭  Skipping per-client local eval this round "
+                  f"(eval_local_every_n_rounds={n_eval}).")
 
         # Create log for the current round
         round_log = {
@@ -729,13 +755,14 @@ class Server:
         else:
             print("  Global CSE: (disabled via config)")
 
-        # Per-client local metrics table
-        print(f"  Per-client local metrics (local model on server test set):")
-        attacker_ids = {c.client_id for c in self.clients if getattr(c, 'is_attacker', False)}
-        for cid in sorted(local_accs_this_round):
-            tag = "ATK" if cid in attacker_ids else "BGN"
-            acc_v = local_accs_this_round[cid]
-            cse_v = local_cse_this_round.get(cid, float('nan'))
-            print(f"    [{tag}] Client {cid}: acc={acc_v:.4f}  cse={cse_v:.4f}")
+        # Per-client local metrics table (only when evaluated this round).
+        if local_accs_this_round:
+            print(f"  Per-client local metrics (local model on server test set):")
+            attacker_ids = {c.client_id for c in self.clients if getattr(c, 'is_attacker', False)}
+            for cid in sorted(local_accs_this_round):
+                tag = "ATK" if cid in attacker_ids else "BGN"
+                acc_v = local_accs_this_round[cid]
+                cse_v = local_cse_this_round.get(cid, float('nan'))
+                print(f"    [{tag}] Client {cid}: acc={acc_v:.4f}  cse={cse_v:.4f}")
 
         return round_log

@@ -214,6 +214,7 @@ def setup_experiment(config):
         compute_classification_semantic_entropy=config.get(
             'eval_classification_semantic_entropy', True),
         semantic_probe_size=int(config.get('semantic_probe_size', 64)),
+        eval_local_every_n_rounds=int(config.get('eval_local_every_n_rounds', 1)),
     )
 
     # 6. Create Clients
@@ -1134,6 +1135,14 @@ def main(config_overrides: Optional[Dict] = None):
         # (see decoder_adapters.py). Runs once at end of FL, requires
         # save_global_checkpoint=True.
         'eval_classification_semantic_entropy': True,   # per round, essentially free
+        # Frequency of per-client local accuracy / CSE evaluation (Phase 5 of
+        # server.run_round). Default 1 = evaluate every round (current behaviour,
+        # gives the densest per-client diagnostic trace). Set to k>1 to evaluate
+        # only on round 0, the final round, and every k-th round in between --
+        # saves ~75% of local-eval time at k=5, at the cost of a coarser
+        # per-client curve. Global Clean Acc / CSE are unaffected (they ride
+        # the test-set forward done once per round on the global model).
+        'eval_local_every_n_rounds': 1,
         'eval_perplexity': True,                         # end-of-FL, moderate cost
         'ppl_num_samples': 200,                          # stratified across classes
         'ppl_seed': 42,
