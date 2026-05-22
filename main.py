@@ -989,28 +989,28 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # === CURRENT RUN: FedAvg, no attack, Yahoo Answers (clean ceiling baseline) ===
-        # 7 benign clients (no attackers); standard FedAvg aggregation on the
-        # Yahoo Answers 10-class topic classification dataset.
-        # Purpose: clean ceiling reference on Yahoo Answers — measures the
-        # achievable Clean Acc / CSE without any adversarial pressure, so that
-        # attack runs and HMP-GAE runs on the same dataset can be compared
-        # against this upper bound.
+        # === CURRENT RUN: FedAvg under Hallucination attack on Yahoo Answers (no-defense lower bound) ===
+        # 5 benign clients + 2 attackers (last 2 client IDs); standard FedAvg
+        # aggregation on the Yahoo Answers 10-class topic classification dataset.
+        # Purpose: lower-bound reference on Yahoo Answers — measures how far
+        # Clean Acc / CSE degrade under the per-round randomized Hallucination
+        # attack when no defense is applied. Pairs with the no-attack clean
+        # ceiling and the HMP-GAE defended run for the dataset's headline triple.
         #
         # Companion runs (change just a couple of fields):
-        #   FedAvg under Hallucination on Yahoo Answers (no-defense lower bound):
-        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
-        #      'num_attackers':2, 'attack_method':'Hallucination'}
+        #   FedAvg, no attack on Yahoo Answers (clean ceiling):
+        #     {'experiment_name':'fedavg_noattack_n7_r50_qwen_yahoo',
+        #      'num_attackers':0, 'attack_method':'NoAttack'}
         #   HMP-GAE under Hallucination on Yahoo Answers (this paper's main result):
         #     {'experiment_name':'hmpgae_hallu_randflip_n7_r50_qwen_yahoo',
         #      'num_attackers':2, 'attack_method':'Hallucination',
         #      'defense_method':'hmp_gae'}
-        'experiment_name': 'fedavg_noattack_n7_r50_qwen_yahoo',
+        'experiment_name': 'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 7,    # Total clients: 7 benign (no attackers in this baseline)
-        'num_attackers': 0,  # No attackers — clean ceiling baseline
+        'num_clients': 7,    # Total clients: 5 benign + 2 attackers (last 2 client IDs)
+        'num_attackers': 2,  # Last 2 client IDs are Hallucination attackers
         'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
@@ -1079,11 +1079,11 @@ def main(config_overrides: Optional[Dict] = None):
 
         # ========== Attack Configuration ==========
         # Supported: 'NoAttack' | 'Hallucination' (this paper) | 'SignFlipping' | 'Gaussian' | 'ALIE'
-        # Current value is 'NoAttack' (paired with num_attackers=0): the clean
-        # ceiling baseline. Switch to 'Hallucination' (with num_attackers>=1)
-        # for the proposed per-round randomized label-flipping attack, or to
-        # one of the classical-baseline strings for V2 comparison runs.
-        'attack_method': 'NoAttack',
+        # Current value is 'Hallucination' (paired with num_attackers=2): the
+        # proposed per-round randomized label-flipping attack. Switch to
+        # 'NoAttack' (with num_attackers=0) for the clean ceiling, or to one
+        # of the classical-baseline strings for V2 comparison runs.
+        'attack_method': 'Hallucination',
         'attack_start_round': None,  # None = attack active from round 0 (default)
 
         # ---- Hallucination (label-flipping, this paper's attacker) ----
