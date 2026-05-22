@@ -989,23 +989,20 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # === CURRENT RUN: FedAvg under Hallucination attack on Yahoo Answers (no-defense lower bound) ===
-        # 5 benign clients + 2 attackers (last 2 client IDs); standard FedAvg
-        # aggregation on the Yahoo Answers 10-class topic classification dataset.
-        # Purpose: lower-bound reference on Yahoo Answers — measures how far
-        # Clean Acc / CSE degrade under the per-round randomized Hallucination
-        # attack when no defense is applied. Pairs with the no-attack clean
-        # ceiling and the HMP-GAE defended run for the dataset's headline triple.
+        # === CURRENT RUN: HMP-GAE under Hallucination attack on Yahoo Answers (this paper's main result) ===
+        # 5 benign clients + 2 attackers (last 2 client IDs); HMP-GAE three-signal
+        # defense (graph + recon + semantic) on the Yahoo Answers 10-class topic
+        # classification dataset. Same attack / data / model as the FedAvg
+        # no-defense baseline — only defense_method differs (controlled variable).
         #
         # Companion runs (change just a couple of fields):
         #   FedAvg, no attack on Yahoo Answers (clean ceiling):
         #     {'experiment_name':'fedavg_noattack_n7_r50_qwen_yahoo',
         #      'num_attackers':0, 'attack_method':'NoAttack'}
-        #   HMP-GAE under Hallucination on Yahoo Answers (this paper's main result):
-        #     {'experiment_name':'hmpgae_hallu_randflip_n7_r50_qwen_yahoo',
-        #      'num_attackers':2, 'attack_method':'Hallucination',
-        #      'defense_method':'hmp_gae'}
-        'experiment_name': 'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
+        #   FedAvg under Hallucination on Yahoo Answers (no-defense lower bound):
+        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
+        #      'defense_method':'fedavg'}
+        'experiment_name': 'hmpgae_hallu_randflip_n7_r50_qwen_yahoo',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
@@ -1119,10 +1116,10 @@ def main(config_overrides: Optional[Dict] = None):
         # defense_method selects the server-side aggregation rule.
         #   'fedavg'  — standard data-size-weighted FedAvg (no-defense baseline)
         #   'hmp_gae' — HMP-GAE immunization (this paper, requires hmp_gae/ subpackage)
-        # Current value is 'fedavg': the explicit no-defense baseline against
-        # which HMP-GAE is compared under the same Hallucination attack. Switch
-        # to 'hmp_gae' for the proposed defense run (matches main paper result).
-        'defense_method': 'fedavg',
+        # Current value is 'hmp_gae': the proposed defense, paired with the
+        # same Hallucination attack / Yahoo Answers data as the FedAvg
+        # no-defense baseline (only this field differs — controlled variable).
+        'defense_method': 'hmp_gae',
         'defense_config': {
             # --- Node features (eta_i) ---
             'proj_dim': 64,              # random-projection dim for flat update
