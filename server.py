@@ -351,6 +351,17 @@ class Server:
             )
             print(f"  ⚖️  Trust weights: {alpha_summary}")
 
+        # Per-client historical-deviation signal: ||z_i - z_hist_i||_2.
+        # Logged every round regardless of hist_weight_beta so we can study
+        # signal direction (attacker high vs benign low) before deciding
+        # whether to give it nonzero weight in the trust score.
+        hist_dev_list = defense_stats.get('hist_dev')
+        if isinstance(hist_dev_list, list) and len(hist_dev_list) == len(client_ids):
+            hist_dev_summary = ", ".join(
+                f"c{cid}={h:.4f}" for cid, h in zip(client_ids, hist_dev_list)
+            )
+            print(f"  🕰️  hist_dev:      {hist_dev_summary}")
+
         # Compute similarity and distance metrics for visualization (unchanged).
         mode = getattr(self, 'similarity_mode', 'local_vs_global')
         if mode == 'local_vs_global':
