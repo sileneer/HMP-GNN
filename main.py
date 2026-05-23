@@ -989,29 +989,18 @@ def analyze_results(metrics):
 def main(config_overrides: Optional[Dict] = None):
     config = {
         # ========== Experiment Configuration ==========
-        # === CURRENT RUN: HMP-GAE under Hallucination attack on Yahoo Answers (this paper's main result) ===
-        # 5 benign clients + 2 attackers (last 2 client IDs); HMP-GAE three-signal
-        # defense (graph + recon + semantic) on the Yahoo Answers 10-class topic
-        # classification dataset. Same attack / data / model as the FedAvg
-        # no-defense baseline — only defense_method differs (controlled variable).
-        #
-        # Companion runs (change just a couple of fields):
-        #   FedAvg, no attack on Yahoo Answers (clean ceiling):
-        #     {'experiment_name':'fedavg_noattack_n7_r50_qwen_yahoo',
-        #      'num_attackers':0, 'attack_method':'NoAttack'}
-        #   FedAvg under Hallucination on Yahoo Answers (no-defense lower bound):
-        #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
-        #      'defense_method':'fedavg'}
-        # Current variant: non-IID Dirichlet(0.5) + semantic_weight=2.0 (vs the
-        # earlier non-IID baseline at semantic_weight=1.0).  Only semantic_weight
-        # differs from that baseline; all other knobs held fixed for controlled
-        # comparison of "boost output-behavior signal weight" hypothesis.
-        'experiment_name': 'hmpgae_hallu_randflip_n7_r50_qwen_yahoo_noniid_a05_sw2',
+        # === CURRENT RUN: FedAvg clean-ceiling baseline on Yahoo Answers (non-IID, no attackers) ===
+        # 7 benign clients, no attackers, no defense (plain FedAvg).  Establishes
+        # the clean ceiling on non-IID Dirichlet(0.5) Yahoo Answers that all
+        # attack / defense runs are compared against.  Because FedAvgDefense
+        # ignores trust_scorer entirely, this baseline is unaffected by the
+        # ongoing HMP-GAE trust-scoring investigation.
+        'experiment_name': '(non-iid)-benign-baseline-fedavg-no-attacker(localround=1,seed=42)',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
-        'num_clients': 7,    # Total clients: 5 benign + 2 attackers (last 2 client IDs)
-        'num_attackers': 2,  # Last 2 client IDs are Hallucination attackers
+        'num_clients': 7,    # Total clients: 7 benign, 0 attackers (clean ceiling)
+        'num_attackers': 0,  # No attackers in this baseline
         'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
@@ -1084,7 +1073,7 @@ def main(config_overrides: Optional[Dict] = None):
         # proposed per-round randomized label-flipping attack. Switch to
         # 'NoAttack' (with num_attackers=0) for the clean ceiling, or to one
         # of the classical-baseline strings for V2 comparison runs.
-        'attack_method': 'Hallucination',
+        'attack_method': 'NoAttack',
         'attack_start_round': None,  # None = attack active from round 0 (default)
 
         # ---- Hallucination (label-flipping, this paper's attacker) ----
@@ -1123,7 +1112,7 @@ def main(config_overrides: Optional[Dict] = None):
         # Current value is 'hmp_gae': the proposed defense, paired with the
         # same Hallucination attack / Yahoo Answers data as the FedAvg
         # no-defense baseline (only this field differs — controlled variable).
-        'defense_method': 'hmp_gae',
+        'defense_method': 'fedavg',
         'defense_config': {
             # --- Node features (eta_i) ---
             'proj_dim': 64,              # random-projection dim for flat update
