@@ -1002,7 +1002,11 @@ def main(config_overrides: Optional[Dict] = None):
         #   FedAvg under Hallucination on Yahoo Answers (no-defense lower bound):
         #     {'experiment_name':'fedavg_hallu_randflip_n7_r50_qwen_yahoo',
         #      'defense_method':'fedavg'}
-        'experiment_name': 'hmpgae_hallu_randflip_n7_r50_qwen_yahoo',
+        # Current variant: non-IID Dirichlet(0.5) + semantic_weight=2.0 (vs the
+        # earlier non-IID baseline at semantic_weight=1.0).  Only semantic_weight
+        # differs from that baseline; all other knobs held fixed for controlled
+        # comparison of "boost output-behavior signal weight" hypothesis.
+        'experiment_name': 'hmpgae_hallu_randflip_n7_r50_qwen_yahoo_noniid_a05_sw2',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
@@ -1045,7 +1049,7 @@ def main(config_overrides: Optional[Dict] = None):
         # ========== Data Distribution ==========
         # For V1 first experiment we use IID to isolate the defense effect from data heterogeneity noise.
         # Switch to 'non-iid' with dirichlet_alpha in [0.3, 1.0] once baseline numbers are stable.
-        'data_distribution': 'iid',      # 'iid' uniform, 'non-iid' Dirichlet-heterogeneous
+        'data_distribution': 'non-iid',  # 'iid' uniform, 'non-iid' Dirichlet-heterogeneous
         'dirichlet_alpha': 0.5,          # Only used when data_distribution='non-iid'. Lower = more heterogeneous.
         # 'dataset_size_limit': None,  # Full dataset: AG News ~120K; IMDB 25K; DBpedia 560K; Yahoo Answers 1.4M
         'dataset_size_limit': 10000,  # 10K train → ~1428 samples/client (7 clients, IID); test ≤ 1500
@@ -1155,7 +1159,11 @@ def main(config_overrides: Optional[Dict] = None):
             # signal that catches geometrically-stealthy hallucination attackers.
             # When >0, the server forwards each client's softmax over a fixed
             # probe set into the runtime; otherwise no probe forward is done.
-            'semantic_weight': 1.0,
+            # Raised from 1.0 -> 2.0 for the non-IID Yahoo Answers run: graph
+            # signal is known to degrade in non-IID, so we give more weight to
+            # the output-behavior signal (orthogonal to update geometry).
+            # Effective signal share: sem rises 44% -> 61%; graph drops 44% -> 30%.
+            'semantic_weight': 2.0,
             # Historical deviation disabled by default: benign clients learning
             # real features drift more than attackers stuck on a fixed mislabel
             # manifold, which can invert the signal. Re-enable with care.
