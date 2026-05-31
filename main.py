@@ -995,13 +995,13 @@ def main(config_overrides: Optional[Dict] = None):
         # defense runs on this dataset are compared against.  Because
         # FedAvgDefense ignores trust_scorer entirely, this baseline is
         # unaffected by the ongoing HMP-GAE trust-scoring investigation.
-        'experiment_name': 'smoke_fltrust',
+        'experiment_name': 'yahoo-(iid)-fltrust-defense-attack(localround=1,seed=42,batch=32,64)',
         'seed': 42,  # Random seed for reproducibility
 
         # ========== Federated Learning Setup ==========
         'num_clients': 7,    # Total clients: 5 benign, 2 attackers (Y2 config)
         'num_attackers': 2,  # SMOKE: 2 attackers (C5/C6), exercises HMP-GAE trust path
-        'num_rounds': 3,    # Total federated learning rounds
+        'num_rounds': 50,    # Total federated learning rounds
 
         # ========== Training Hyperparameters ==========
         'client_lr': 5e-5,   # Learning rate for local client training
