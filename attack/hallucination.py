@@ -59,10 +59,20 @@ class FlippedLabelDataset(Dataset):
     """
     Dataset wrapper that overrides labels according to a flip strategy.
 
-    Three modes are supported, matching the flip_mode config:
-      - 'pairwise'  : replace label by flip_map[label] (fixed bijection)
-      - 'targeted'  : replace every flipped sample with a fixed target_class
-      - 'random'    : replace with a uniformly random *other* class
+    Four modes are supported, matching the flip_mode config:
+      - 'pairwise'      : replace label by flip_map[label] (fixed bijection)
+      - 'targeted'      : replace every flipped sample with a fixed target_class
+      - 'random'        : replace with a uniformly random *other* class
+      - 'subset_random' : replace with a uniformly random class drawn from
+                          `target_subset` (excluding the original label).
+                          Same law as 'random' but restricted to a slice of the
+                          label space, so two attackers given DISJOINT subsets
+                          push the model in systematically different directions
+                          while each stays high-entropy. Note this constrains
+                          only the TARGET, never which samples are eligible, so
+                          flip_ratio keeps its usual "fraction of this client's
+                          samples that get corrupted" meaning and attack rate is
+                          directly comparable to 'random'.
 
     Flipping is deterministic given `seed` and `flip_ratio`. By default the
     flipped label set is pre-computed once at construction time so that
@@ -84,6 +94,7 @@ class FlippedLabelDataset(Dataset):
         num_labels: int,
         target_class: Optional[int] = None,
         seed: int = 0,
+        target_subset: Optional[List[int]] = None,
     ):
         if not isinstance(base_dataset, NewsDataset):
             raise TypeError(
@@ -95,7 +106,30 @@ class FlippedLabelDataset(Dataset):
         self.flip_map = {int(k): int(v) for k, v in (flip_map or {}).items()}
         self.num_labels = int(num_labels)
         self.target_class = None if target_class is None else int(target_class)
+        self.target_subset = (
+            None if target_subset is None else sorted({int(c) for c in target_subset})
+        )
         self.seed = int(seed)
+
+        if self.flip_mode == "subset_random":
+            # Validate here rather than per-sample: a bad subset would otherwise
+            # surface as a silent no-op (every _apply_flip returning `orig`),
+            # i.e. an attacker that quietly stops attacking for 50 rounds.
+            if not self.target_subset:
+                raise ValueError("flip_mode='subset_random' requires a non-empty target_subset")
+            bad = [c for c in self.target_subset if not (0 <= c < self.num_labels)]
+            if bad:
+                raise ValueError(
+                    f"target_subset {self.target_subset} has entries outside "
+                    f"[0, {self.num_labels}): {bad}"
+                )
+            if len(self.target_subset) < 2:
+                raise ValueError(
+                    "flip_mode='subset_random' needs |target_subset| >= 2, else a "
+                    "sample already carrying that label has no valid target and the "
+                    f"flip silently no-ops; got {self.target_subset}. Use "
+                    "flip_mode='targeted' for a single-class objective."
+                )
 
         self.flipped_labels: List[int] = self._precompute_flipped_labels()
         self.num_flipped: int = self._count_flipped()
@@ -146,6 +180,11 @@ class FlippedLabelDataset(Dataset):
             choices = [c for c in range(self.num_labels) if c != orig]
             if not choices:
                 return orig
+            return int(rng.choice(choices))
+        if self.flip_mode == "subset_random":
+            # Uniform over target_subset != orig. Constructor guarantees
+            # |target_subset| >= 2, so `choices` is never empty.
+            choices = [c for c in self.target_subset if c != orig]
             return int(rng.choice(choices))
         raise ValueError(f"Unknown flip_mode={self.flip_mode!r}")
 
@@ -200,6 +239,7 @@ class HallucinationAttackerClient(BenignClient):
         flip_seed: Optional[int] = None,
         per_round_reseed: bool = False,
         flip_ratio_range: Optional[Tuple[float, float]] = None,
+        target_subset: Optional[List[int]] = None,
     ):
         super().__init__(
             client_id=client_id,
@@ -220,6 +260,9 @@ class HallucinationAttackerClient(BenignClient):
         self.flip_map = dict(flip_map or {})
         self.num_labels = int(num_labels)
         self.target_class = target_class
+        self.target_subset = (
+            None if target_subset is None else sorted({int(c) for c in target_subset})
+        )
         self._flip_seed = int(flip_seed if flip_seed is not None else client_id)
 
         # ---- Per-round randomization options ---- #
@@ -259,6 +302,7 @@ class HallucinationAttackerClient(BenignClient):
             num_labels=self.num_labels,
             target_class=self.target_class,
             seed=self._flip_seed,
+            target_subset=self.target_subset,
         )
         self._flipped_loader: DataLoader = DataLoader(
             flipped_dataset,
