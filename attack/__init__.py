@@ -5,11 +5,13 @@
 from .alie import ALIEAttackerClient
 from .gaussian import GaussianAttackerClient
 from .hallucination import HallucinationAttackerClient
+from .mimic import MimicAttackerClient
 from .sign_flipping import SignFlippingAttackerClient
 
 __all__ = [
     "ALIEAttackerClient",
     "GaussianAttackerClient",
     "HallucinationAttackerClient",
+    "MimicAttackerClient",
     "SignFlippingAttackerClient",
 ]
