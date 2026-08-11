@@ -331,8 +331,9 @@ def setup_experiment(config):
             elif attack_method == 'Hallucination':
                 # Label-flipping (this paper); per-round randomization in attack/hallucination.py.
                 from attack.hallucination import HallucinationAttackerClient
-                print(f"  Client {client_id}: ATTACKER (Hallucination Attack - Label Flipping)")
-                print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
+                # Role header is printed AFTER the arm flags resolve below -- under
+                # hallu_mimic_benign the last attacker does no label flipping at all,
+                # so a fixed "Label Flipping" header would misdescribe it in the log.
                 client_texts_h = [data_manager.train_texts[i] for i in client_indices[client_id]]
                 client_labels_h = [data_manager.train_labels[i] for i in client_indices[client_id]]
                 dataset_h = NewsDataset(client_texts_h, client_labels_h, data_manager.tokenizer,
@@ -341,28 +342,153 @@ def setup_experiment(config):
                 hallu_flip_map = config.get('hallu_flip_map', {0: 1, 1: 0, 2: 3, 3: 2})
                 # Keys may be strings if config is loaded from JSON; normalize to int.
                 hallu_flip_map = {int(k): int(v) for k, v in hallu_flip_map.items()}
+                hallu_flip_mode = str(config.get('hallu_flip_mode', 'pairwise'))
+                hallu_target_subset = None
+                # ---- Heterogeneous-attacker arms (2026-08-05 / 08-09) -------- #
+                # Under the archived default (flip_mode='random') every attacker
+                # draws from the SAME law -- uniform over all wrong classes -- so the
+                # two attackers differ only by RNG seed.  That shared structure is
+                # exactly what FoolsGold's similarity penalty and HMP-GAE's
+                # hypergraph-isolation channel rely on.  Three mutually exclusive arms
+                # attack that assumption; all are keyed off attacker_rank (0-indexed
+                # over the LAST num_attackers client ids, so rank 0 = C5, rank 1 = C6).
+                # 'opposite' / 'disjoint' work in LABEL space (both refuted, see the
+                # config comments); 'mimic' works in UPDATE space.
+                _opposite = bool(config.get('hallu_opposite_directions', False))
+                _disjoint = bool(config.get('hallu_disjoint_target_subsets', False))
+                _mimic = bool(config.get('hallu_mimic_benign', False))
+                _arms_on = [
+                    name for name, on in (
+                        ('hallu_opposite_directions', _opposite),
+                        ('hallu_disjoint_target_subsets', _disjoint),
+                        ('hallu_mimic_benign', _mimic),
+                    ) if on
+                ]
+                if len(_arms_on) > 1:
+                    raise ValueError(
+                        "heterogeneous-attacker arms are mutually exclusive "
+                        f"(each redefines what an attacker does); enabled: {_arms_on}. "
+                        "Turn on exactly one, or none for the canonical 'random' attack."
+                    )
+                if _mimic and effective_num_attackers < 2:
+                    raise ValueError(
+                        "hallu_mimic_benign converts the LAST attacker into a copycat "
+                        "that injects no poison of its own; "
+                        f"num_attackers={effective_num_attackers} would leave zero real "
+                        "attackers. Needs num_attackers >= 2."
+                    )
+                attacker_rank = client_id - (
+                    config['num_clients'] - effective_num_attackers
+                )
+                n_lab = int(config.get('num_labels', 4))
+                _is_mimic_slot = _mimic and attacker_rank == effective_num_attackers - 1
+                print(f"  Client {client_id}: ATTACKER ("
+                      + ("Mimic — copies a benign update, no label flipping"
+                         if _is_mimic_slot else "Hallucination Attack - Label Flipping")
+                      + ")")
+                print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
+                if _opposite:
+                    # ARM "opposite": each attacker gets its own DETERMINISTIC
+                    # direction -- rank r uses the cyclic shift y -> (y + s) mod C
+                    # with s = +1 for even r, -1 for odd r (C5 up, C6 down).  Cyclic
+                    # shifts are bijections, so each attacker's label MARGINAL is
+                    # unchanged and only the pairing is wrong (stealthier than
+                    # 'targeted', which collapses every flipped sample onto one
+                    # class).  Overrides hallu_flip_map, which is inert in this arm.
+                    # WARNING: a deterministic map makes the attacker's local model
+                    # CONFIDENTLY wrong (low entropy), which is expected to push its
+                    # CSE ratio BELOW V4's one-sided v4_tau_ratio gate.  Diagnostic
+                    # arm for V4's scope limit -- not the arm that favours V4.
+                    shift = 1 if attacker_rank % 2 == 0 else -1
+                    hallu_flip_map = {y: (y + shift) % n_lab for y in range(n_lab)}
+                    hallu_flip_mode = 'pairwise'
+                    print(f"    [arm=opposite] attacker_rank={attacker_rank}, "
+                          f"shift={shift:+d}  (y -> (y{shift:+d}) mod {n_lab}), "
+                          f"flip_mode='pairwise'")
+                elif _disjoint:
+                    # ARM "disjoint" (the FoolsGold-breaking arm): each attacker keeps
+                    # a RANDOM target law -- so its local model stays high-entropy and
+                    # V4's CSE gate keeps firing -- but draws that target from its own
+                    # contiguous slice of the label space.  C5 pushes everything into
+                    # {0..4}, C6 into {5..9}: systematically different update
+                    # directions, so the cosine similarity FoolsGold penalises
+                    # collapses, while each attacker individually looks exactly as
+                    # anomalous to an absolute per-client statistic as before.
+                    # Only the TARGET is constrained, never which samples are
+                    # eligible, so flip_ratio keeps its meaning and the corruption
+                    # RATE stays identical to the archived 'random' runs -- the
+                    # single changed factor is WHERE the corruption points.
+                    k = max(1, effective_num_attackers)
+                    if n_lab < 2 * k:
+                        raise ValueError(
+                            "hallu_disjoint_target_subsets needs num_labels >= "
+                            f"2*num_attackers so every slice has >= 2 classes; got "
+                            f"num_labels={n_lab}, num_attackers={k}"
+                        )
+                    lo = (attacker_rank * n_lab) // k
+                    hi = ((attacker_rank + 1) * n_lab) // k
+                    hallu_target_subset = list(range(lo, hi))
+                    hallu_flip_mode = 'subset_random'
+                    print(f"    [arm=disjoint] attacker_rank={attacker_rank}, "
+                          f"target_subset={hallu_target_subset}, "
+                          f"flip_mode='subset_random'")
                 hallu_flip_ratio_range = config.get('hallu_flip_ratio_range', None)
                 if hallu_flip_ratio_range is not None:
                     hallu_flip_ratio_range = tuple(float(x) for x in hallu_flip_ratio_range)
-                client = HallucinationAttackerClient(
-                    client_id=client_id,
-                    model=global_model,
-                    data_loader=client_loader_h,
-                    lr=config['client_lr'],
-                    local_epochs=config['local_epochs'],
-                    alpha=config['alpha'],
-                    data_indices=client_indices[client_id],
-                    grad_clip_norm=config.get('grad_clip_norm', 1.0),
-                    flip_ratio=float(config.get('hallu_flip_ratio', 1.0)),
-                    flip_mode=str(config.get('hallu_flip_mode', 'pairwise')),
-                    flip_map=hallu_flip_map,
-                    num_labels=config.get('num_labels', 4),
-                    target_class=config.get('hallu_target_class', None),
-                    attack_start_round=int(config.get('hallu_attack_start_round', 0)),
-                    claimed_data_size=claimed_data_size,
-                    per_round_reseed=bool(config.get('hallu_per_round_reseed', False)),
-                    flip_ratio_range=hallu_flip_ratio_range,
-                )
+                if _is_mimic_slot:
+                    # ARM "mimic" (the FoolsGold false-alarm arm): the LAST attacker
+                    # stops attacking altogether and instead submits a verbatim copy
+                    # of one benign client's update.  FoolsGold's pardoning factor
+                    # min(1, max_cs[i]/max_cs[j]) can only rescue a client whose own
+                    # max similarity is LOWER than its accuser's; an exact copy makes
+                    # both exactly 1, so the victim cannot be pardoned and the defense
+                    # ejects a benign client.  Every other attacker keeps the canonical
+                    # 'random' behaviour, so this is a single-factor contrast against
+                    # the archived Y18 run.  Target = benign client with the LARGEST
+                    # shard, so the false positive costs the federation the most data
+                    # (ties broken by lowest client_id -> deterministic).
+                    from attack.mimic import MimicAttackerClient
+                    _benign_ids = range(config['num_clients'] - effective_num_attackers)
+                    mimic_target_id = max(
+                        _benign_ids, key=lambda i: len(client_indices[i])
+                    )
+                    print(f"    [arm=mimic] attacker_rank={attacker_rank}, "
+                          f"mimic_target_id={mimic_target_id} "
+                          f"({len(client_indices[mimic_target_id])} samples, largest "
+                          f"benign shard), no label flipping on this client")
+                    client = MimicAttackerClient(
+                        client_id=client_id,
+                        model=global_model,
+                        data_loader=client_loader_h,
+                        lr=config['client_lr'],
+                        local_epochs=config['local_epochs'],
+                        alpha=config['alpha'],
+                        mimic_target_id=mimic_target_id,
+                        data_indices=client_indices[client_id],
+                        grad_clip_norm=config.get('grad_clip_norm', 1.0),
+                        claimed_data_size=claimed_data_size,
+                    )
+                else:
+                    client = HallucinationAttackerClient(
+                        client_id=client_id,
+                        model=global_model,
+                        data_loader=client_loader_h,
+                        lr=config['client_lr'],
+                        local_epochs=config['local_epochs'],
+                        alpha=config['alpha'],
+                        data_indices=client_indices[client_id],
+                        grad_clip_norm=config.get('grad_clip_norm', 1.0),
+                        flip_ratio=float(config.get('hallu_flip_ratio', 1.0)),
+                        flip_mode=hallu_flip_mode,
+                        flip_map=hallu_flip_map,
+                        num_labels=config.get('num_labels', 4),
+                        target_class=config.get('hallu_target_class', None),
+                        attack_start_round=int(config.get('hallu_attack_start_round', 0)),
+                        claimed_data_size=claimed_data_size,
+                        per_round_reseed=bool(config.get('hallu_per_round_reseed', False)),
+                        flip_ratio_range=hallu_flip_ratio_range,
+                        target_subset=hallu_target_subset,
+                    )
             elif attack_method == 'Gaussian':
                 from attack.gaussian import GaussianAttackerClient
                 print(f"  Client {client_id}: ATTACKER (Gaussian Attack, USENIX Security '20)")
@@ -1128,7 +1254,7 @@ def main():
     # for any hypergraph-attributable claim, docs/DECISION.md).
     config = {
         # ========== Experiment ==========
-        'experiment_name': 'agnews-(non-iid0.5)-hmpgae-v8-hallu(localround=1,seed=42,r50,len128,flip0.3-0.8)-llama3.2-1b',
+        'experiment_name': 'agnews-(non-iid0.5)-hmpgae-v8-mimic-benign-attacker(localround=1,seed=42,r50,len128,flip0.3-0.8)-qwen',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1195,9 +1321,9 @@ def main():
         'lora_alpha': 16,             # keep at 2*r
         'lora_dropout': 0.1,
         'lora_target_modules': None,  # None = auto-resolve per backbone in models.py
-                                      # (Llama/Qwen/Mistral → q/k/v/o_proj; OPT → q/k/v/out_proj;
-                                      #  GPT-2 → c_attn/c_proj; Pythia → query_key_value/dense_*;
-                                      #  DistilBERT → *_lin; BERT/RoBERTa → query/key/value/dense).
+                                       # (Llama/Qwen/Mistral → q/k/v/o_proj; OPT → q/k/v/out_proj;
+                                       #  GPT-2 → c_attn/c_proj; Pythia → query_key_value/dense_*;
+                                       #  DistilBERT → *_lin; BERT/RoBERTa → query/key/value/dense).
                                       # An unrecognised backbone stays None = PEFT's own default.
         # Any HF sequence-classification repo id loads; these are the verified
         # ones. Encoder: 'distilbert-base-uncased' | 'bert-base-uncased' |
@@ -1205,7 +1331,7 @@ def main():
         # 'EleutherAI/pythia-160m' | 'EleutherAI/pythia-1b' | 'facebook/opt-125m' |
         # 'Qwen/Qwen2.5-0.5B' (ungated, fits T4 15GB) | 'meta-llama/Llama-3.2-1B'
         # (GATED: HF license + HF_TOKEN; fp32 needs A100). PPL needs a decoder.
-        'model_name': 'meta-llama/Llama-3.2-1B',
+        'model_name': 'Qwen/Qwen2.5-0.5B',
         
 
         # ========== Attack ==========
@@ -1232,6 +1358,28 @@ def main():
         'hallu_attack_start_round': 0,
         'hallu_per_round_reseed': True,              # False = legacy frozen-flip behaviour
         'hallu_flip_ratio_range': [0.3, 0.8],        # None → scalar hallu_flip_ratio
+
+        # Heterogeneous-attacker arms — MUTUALLY EXCLUSIVE (main.py raises if >1 on).
+        # All three break the "both attackers draw from the same law" assumption that
+        # FoolsGold's similarity penalty and HMP-GAE's isolation channel exploit.
+        #   disjoint  LABEL-space; per-attacker contiguous target slice, forces
+        #             flip_mode='subset_random'. Needs num_labels >= 2*num_attackers.
+        #             REFUTED 2026-08-06 (Y19/Y20) — keep OFF; attacker similarity comes
+        #             from label-noise ENTROPY, not from which classes flips point at.
+        #   opposite  LABEL-space; deterministic cyclic shift per rank (+1 even, -1 odd),
+        #             forces flip_mode='pairwise'. Diagnostic for V4's one-sided CSE gate;
+        #             low-entropy by design, so detection collapsing is the EXPECTED
+        #             result, NOT a licence to re-tune v4_tau_ratio. Needs num_labels >= 3.
+        #   mimic     UPDATE-space; the LAST attacker trains honestly and submits a
+        #             VERBATIM COPY of the largest benign shard's update, making
+        #             FoolsGold's pardoning factor min(1, max_cs[i]/max_cs[j]) exactly 1
+        #             both ways so the honest victim is unpardonable. Needs
+        #             num_attackers >= 2. V4+ is NOT deceived (the copycat's local model
+        #             is genuinely benign, crafts_update stays False).
+        # Pre-registered predictions and the full refutation record: docs/DECISION.md.
+        'hallu_disjoint_target_subsets': False,
+        'hallu_opposite_directions': False,
+        'hallu_mimic_benign': True,
 
         # ---- Classical Byzantine baselines; each key is read only when
         # attack_method selects that family. These forge the UPDATE while
@@ -1361,11 +1509,11 @@ def main():
 
         # ========== Checkpoints ==========
         'save_global_checkpoint': True,   # needed for PPL / downstream eval
-        'global_checkpoint_subdir': 'global_checkpoint_agnews_llama_v8_seed42',
+        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_v8_mimic_seed42',
         # Per-round resume snapshot (Colab resilience; fingerprint guard: fed_resume.py)
         'save_round_checkpoint': True,
         'resume_from_checkpoint': True,   # False = force a fresh run
-        'round_checkpoint_subdir': 'round_checkpoint_agnews_llama_v8_seed42',
+        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_v8_mimic_seed42',
         # ========== Task 2: optional downstream generation after FL ==========
         'run_downstream_after_fl': False,   # subprocess run_downstream_generation.py
         'downstream_probes': None,          # probe JSON path; None skips Task 2
