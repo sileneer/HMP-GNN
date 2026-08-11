@@ -139,8 +139,43 @@ def test_exact_copy_zeroes_the_victims_foolsgold_weight():
     )
 
 
+def test_all_attackers_copying_one_victim_zero_the_whole_trio():
+    """Active arm: EVERY attacker copies the SAME benign client (Karimireddy '22).
+
+    With 5 clients = 3 benign + 2 copycats of benign c0, the accumulated histories
+    of {c0, c3, c4} are identical, so every pairwise cosine inside that trio is 1
+    and every max_cs is 1 -- no pardoning is possible in any direction and all
+    three collapse to wv = 0. Only c1 and c2 survive to be aggregated.
+
+    This is the property the whole arm rests on: no attacker flipped a label, so
+    every point the federation loses here is a pure false positive.
+    """
+    d = 8
+    base = [torch.zeros(d) for _ in range(3)]
+    for i, u in enumerate(base):
+        u[i] = 1.0
+
+    updates = [base[0], base[1], base[2], base[0].clone(), base[0].clone()]
+    defense = FoolsGoldDefense(num_clients=5)
+    _, stats = defense.aggregate(
+        updates, [0, 1, 2, 3, 4], [1.0] * 5, round_num=0, device=torch.device("cpu")
+    )
+    alpha = stats["alpha"]
+    assert alpha[0] == 0.0, (
+        f"FALSE POSITIVE not reproduced: benign victim c0 kept alpha={alpha[0]} "
+        f"(full alpha={alpha}). The arm has no effect -- do not run it."
+    )
+    assert alpha[3] == 0.0 and alpha[4] == 0.0, (
+        f"both copycats should be zeroed, got {alpha}"
+    )
+    assert alpha[1] > 0.0 and alpha[2] > 0.0, (
+        f"uninvolved benign clients must survive, got {alpha}"
+    )
+
+
 if __name__ == "__main__":
     test_submits_target_update_not_own()
     test_missing_target_crashes_loudly()
     test_exact_copy_zeroes_the_victims_foolsgold_weight()
+    test_all_attackers_copying_one_victim_zero_the_whole_trio()
     print("\nAll mimic-attack tests passed.")

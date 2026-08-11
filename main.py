@@ -332,8 +332,8 @@ def setup_experiment(config):
                 # Label-flipping (this paper); per-round randomization in attack/hallucination.py.
                 from attack.hallucination import HallucinationAttackerClient
                 # Role header is printed AFTER the arm flags resolve below -- under
-                # hallu_mimic_benign the last attacker does no label flipping at all,
-                # so a fixed "Label Flipping" header would misdescribe it in the log.
+                # hallu_mimic_benign NO attacker does label flipping at all, so a
+                # fixed "Label Flipping" header would misdescribe them in the log.
                 client_texts_h = [data_manager.train_texts[i] for i in client_indices[client_id]]
                 client_labels_h = [data_manager.train_labels[i] for i in client_indices[client_id]]
                 dataset_h = NewsDataset(client_texts_h, client_labels_h, data_manager.tokenizer,
@@ -370,21 +370,25 @@ def setup_experiment(config):
                         f"(each redefines what an attacker does); enabled: {_arms_on}. "
                         "Turn on exactly one, or none for the canonical 'random' attack."
                     )
-                if _mimic and effective_num_attackers < 2:
+                _num_benign = config['num_clients'] - effective_num_attackers
+                if _mimic and _num_benign < 1:
                     raise ValueError(
-                        "hallu_mimic_benign converts the LAST attacker into a copycat "
-                        "that injects no poison of its own; "
-                        f"num_attackers={effective_num_attackers} would leave zero real "
-                        "attackers. Needs num_attackers >= 2."
+                        "hallu_mimic_benign needs at least one benign client to copy; "
+                        f"num_clients={config['num_clients']} with "
+                        f"num_attackers={effective_num_attackers} leaves none."
                     )
-                attacker_rank = client_id - (
-                    config['num_clients'] - effective_num_attackers
-                )
+                attacker_rank = client_id - _num_benign
                 n_lab = int(config.get('num_labels', 4))
-                _is_mimic_slot = _mimic and attacker_rank == effective_num_attackers - 1
+                # EVERY attacker becomes a copycat of the SAME benign client -- the
+                # canonical mimic attack (Karimireddy et al., ICLR '22: "all Byzantine
+                # workers pick a good worker to mimic and copy its output").  This
+                # leaves ZERO poison in the federation, which is the point: any
+                # accuracy the federation loses is inflicted purely by the defense's
+                # own false positive, with no true positive to offset it.
+                _is_mimic = _mimic
                 print(f"  Client {client_id}: ATTACKER ("
                       + ("Mimic — copies a benign update, no label flipping"
-                         if _is_mimic_slot else "Hallucination Attack - Label Flipping")
+                         if _is_mimic else "Hallucination Attack - Label Flipping")
                       + ")")
                 print(f"    Claimed data size D'_j(t): {claimed_data_size} (matches assigned data)")
                 if _opposite:
@@ -435,22 +439,28 @@ def setup_experiment(config):
                 hallu_flip_ratio_range = config.get('hallu_flip_ratio_range', None)
                 if hallu_flip_ratio_range is not None:
                     hallu_flip_ratio_range = tuple(float(x) for x in hallu_flip_ratio_range)
-                if _is_mimic_slot:
-                    # ARM "mimic" (the FoolsGold false-alarm arm): the LAST attacker
-                    # stops attacking altogether and instead submits a verbatim copy
-                    # of one benign client's update.  FoolsGold's pardoning factor
-                    # min(1, max_cs[i]/max_cs[j]) can only rescue a client whose own
-                    # max similarity is LOWER than its accuser's; an exact copy makes
-                    # both exactly 1, so the victim cannot be pardoned and the defense
-                    # ejects a benign client.  Every other attacker keeps the canonical
-                    # 'random' behaviour, so this is a single-factor contrast against
-                    # the archived Y18 run.  Target = benign client with the LARGEST
-                    # shard, so the false positive costs the federation the most data
-                    # (ties broken by lowest client_id -> deterministic).
+                if _is_mimic:
+                    # ARM "mimic" (the FoolsGold false-alarm arm): EVERY attacker stops
+                    # attacking and submits a verbatim copy of the SAME benign client's
+                    # update.  FoolsGold's pardoning factor min(1, max_cs[i]/max_cs[j])
+                    # can only rescue a client whose own max similarity is LOWER than
+                    # its accuser's; exact copies make every pair in {victim, copycats}
+                    # exactly 1, so nothing is pardoned and ALL of them collapse to
+                    # wv = 0 -- the defense ejects its victim along with the copycats.
+                    # Because no attacker flips any label, the federation contains ZERO
+                    # poison: every point lost is a pure false positive, with no true
+                    # positive to offset it.  A similarity-free absolute per-client
+                    # statistic (V4+ local CSE) sees nothing wrong and keeps all N.
+                    # Target = benign client with the LARGEST shard, so the false
+                    # positive costs the federation the most data (ties -> lowest
+                    # client_id, deterministic).  NOTE this differs from Karimireddy et
+                    # al.'s i* = argmax projection onto the honest-update principal
+                    # variance direction; largest-shard maximises DATA loss rather than
+                    # middle-seeking bias, and needs partition knowledge the client
+                    # itself does not have (see attack/mimic.py).
                     from attack.mimic import MimicAttackerClient
-                    _benign_ids = range(config['num_clients'] - effective_num_attackers)
                     mimic_target_id = max(
-                        _benign_ids, key=lambda i: len(client_indices[i])
+                        range(_num_benign), key=lambda i: len(client_indices[i])
                     )
                     print(f"    [arm=mimic] attacker_rank={attacker_rank}, "
                           f"mimic_target_id={mimic_target_id} "
@@ -1248,13 +1258,16 @@ def main():
     # prints "[resume] Starting fresh" and restarts at round 0 instead of
     # silently mixing trajectories. Mid-run edits are not resumable by design.
     #
-    # CURRENT ARM (user-requested): V8 dual-view HMP + CSE-seeded propagation.
-    # Ablation arms: 'v4_cse_reject' (detect-then-suppress, constant multiplier)
-    # and 'v5_cse_reject' (V8 minus the hypergraph — THE matched-run baseline
-    # for any hypergraph-attributable claim, docs/DECISION.md).
+    # CURRENT ARM: FoolsGold under the all-mimic attack (zero poison; every
+    # attacker copies the same benign client). defense_config below is INERT --
+    # server.py gates the probe forward and the pre-aggregation local CSE on
+    # defense_method == 'hmp_gae', so only 'epsilon' is read here. Companion runs
+    # for the same arm: 'hmp_gae' (V8) and a NoAttack ceiling.
     config = {
         # ========== Experiment ==========
-        'experiment_name': 'agnews-(non-iid0.5)-hmpgae-v8-mimic-benign-attacker(localround=1,seed=42,r50,len128,flip0.3-0.8)-qwen',
+        # flip params are INERT in this arm: under hallu_mimic_benign no attacker
+        # flips anything, so the name records 'noflip' rather than a ratio range.
+        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-mimic-benign(localround=1,seed=42,r50,len128,noflip)-qwen',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1370,12 +1383,19 @@ def main():
         #             forces flip_mode='pairwise'. Diagnostic for V4's one-sided CSE gate;
         #             low-entropy by design, so detection collapsing is the EXPECTED
         #             result, NOT a licence to re-tune v4_tau_ratio. Needs num_labels >= 3.
-        #   mimic     UPDATE-space; the LAST attacker trains honestly and submits a
-        #             VERBATIM COPY of the largest benign shard's update, making
-        #             FoolsGold's pardoning factor min(1, max_cs[i]/max_cs[j]) exactly 1
-        #             both ways so the honest victim is unpardonable. Needs
-        #             num_attackers >= 2. V4+ is NOT deceived (the copycat's local model
-        #             is genuinely benign, crafts_update stays False).
+        #   mimic     UPDATE-space, ACTIVE ARM. EVERY attacker trains honestly and
+        #             submits a VERBATIM COPY of the SAME benign client (largest shard)
+        #             — the canonical mimic attack of Karimireddy et al., ICLR '22.
+        #             Exact copies make FoolsGold's pardoning factor
+        #             min(1, max_cs[i]/max_cs[j]) equal 1 in both directions, so the
+        #             honest victim is unpardonable and is zeroed alongside the
+        #             copycats. Zero poison is injected, so 100% of the accuracy the
+        #             federation loses is the defense's own false positive. V4+/V8 is
+        #             NOT deceived: every local model is genuinely benign, so the
+        #             absolute per-client CSE is normal and crafts_update stays False.
+        #             Under plain FedAvg this arm still skews weighting (the victim's
+        #             direction gets the copycats' data weight too), so the true
+        #             ceiling is a separate NoAttack run, not this arm's FedAvg row.
         # Pre-registered predictions and the full refutation record: docs/DECISION.md.
         'hallu_disjoint_target_subsets': False,
         'hallu_opposite_directions': False,
@@ -1399,7 +1419,7 @@ def main():
         # | 'fltrust' | 'foolsgold'. Matching is case-insensitive and accepts
         # separator variants ('multikrum', 'coord-median', ...); 'none' is an
         # alias for 'fedavg'. Anything else raises in defense.build_defense.
-        'defense_method': 'hmp_gae',
+        'defense_method': 'foolsgold',
         'defense_config': {
             # -- Baseline-defense knobs — inert under hmp_gae, EXCEPT num_byzantine:
             # the CSE-reject family reuses it as its rank cap (must be < N/2).
@@ -1509,11 +1529,11 @@ def main():
 
         # ========== Checkpoints ==========
         'save_global_checkpoint': True,   # needed for PPL / downstream eval
-        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_v8_mimic_seed42',
+        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_foolsgold_allmimic_seed42',
         # Per-round resume snapshot (Colab resilience; fingerprint guard: fed_resume.py)
         'save_round_checkpoint': True,
         'resume_from_checkpoint': True,   # False = force a fresh run
-        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_v8_mimic_seed42',
+        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_foolsgold_allmimic_seed42',
         # ========== Task 2: optional downstream generation after FL ==========
         'run_downstream_after_fl': False,   # subprocess run_downstream_generation.py
         'downstream_probes': None,          # probe JSON path; None skips Task 2
