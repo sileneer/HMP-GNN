@@ -1,5 +1,5 @@
 # attack/mimic.py
-# Copycat attacker: submits a verbatim copy of one benign client's update.
+# Copycat attacker: submits a close copy of one benign client's update.
 #
 # Target: FoolsGold (Fung et al., RAID '20), whose per-client weight is
 #
@@ -11,8 +11,8 @@
 # cos = 1 on both sides, so max_cs is 1 for both, so the ratio is 1 and nothing is
 # pardoned -- and both the victim and the copycat collapse to wv = 0.  The copycat
 # therefore manufactures a FALSE POSITIVE: the defense ejects a benign client.
-# It injects no poison of its own (it trains honestly), so every point the
-# federation loses to it is inflicted by the defense, not by the attack.
+# It performs no label poisoning and trains honestly. Optional noise makes the
+# copied updates close but non-identical while preserving the target norm.
 #
 # Why update-space and not label-space:
 #   The two label-space arms in attack/hallucination.py
@@ -22,8 +22,8 @@
 #   component dominates the update vector, so the attackers remained the MOST
 #   mutually similar clients in the pool (final-round pairwise cosine 0.470 /
 #   0.517 vs 0.299-0.385 for benign) and FoolsGold zeroed them from round 5
-#   onward.  This attacker skips the indirection and sets the cosine to 1.0
-#   directly in the space where the defense actually measures it.
+#   onward. This attacker skips the indirection and controls the cosine directly
+#   in the space where the defense actually measures it.
 #
 # Deliberately NOT an update FORGER in the AugMP sense: the malicious signal does
 # not live in a crafted vector, it lives in the defense's reaction to a genuine
@@ -34,7 +34,9 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import math
+import random
+from typing import Dict, List, Optional, Sequence
 
 import torch
 from torch.utils.data import DataLoader
@@ -45,7 +47,7 @@ from client import BenignClient
 class MimicAttackerClient(BenignClient):
     """
     Copycat attacker: trains honestly, then submits benign `mimic_target_id`'s
-    update verbatim instead of its own.
+    update exactly or with a controlled, norm-preserving honest residual.
 
     Notes on the FL server interface:
       - is_attacker = True, so the server routes this client through Phase 3 and
@@ -54,8 +56,9 @@ class MimicAttackerClient(BenignClient):
       - `mimic_target_id` is chosen by the caller (main.py) rather than here: the
         client only receives updates + ids from the server, never data sizes, and
         the "largest benign shard" policy needs the partition, which main.py has.
-      - camouflage_update discards the honestly-trained update. The client MODEL
-        keeps the honest weights, which is what V4's pre-aggregation local CSE
+      - camouflage_update uses the honestly-trained update only to supply a
+        client-specific direction orthogonal to the target. The client MODEL
+        keeps the honest weights, which is what V4+'s pre-aggregation local CSE
         evaluates -- intentionally, see the module docstring.
     """
 
@@ -71,6 +74,8 @@ class MimicAttackerClient(BenignClient):
         data_indices: Optional[List[int]] = None,
         grad_clip_norm: float = 1.0,
         claimed_data_size: float = 1.0,
+        mimic_cosine_range: Optional[Sequence[float]] = None,
+        mimic_noise_seed: int = 42,
     ):
         super().__init__(
             client_id=client_id,
@@ -91,11 +96,24 @@ class MimicAttackerClient(BenignClient):
         self.attack_method = "Mimic"
         self.claimed_data_size = float(claimed_data_size)
         self.mimic_target_id = int(mimic_target_id)
+        cosine_range = [1.0, 1.0] if mimic_cosine_range is None else mimic_cosine_range
+        if len(cosine_range) != 2:
+            raise ValueError("hallu_mimic_cosine_range must be [lo, hi]")
+        lo, hi = float(cosine_range[0]), float(cosine_range[1])
+        if not 0.0 < lo <= hi <= 1.0:
+            raise ValueError("hallu_mimic_cosine_range must satisfy 0 < lo <= hi <= 1")
+        self.mimic_cosine_range = (lo, hi)
+        self.mimic_noise_seed = int(mimic_noise_seed)
         # Filled every round by receive_benign_updates (server Phase 3).
         self._benign_updates: Dict[int, torch.Tensor] = {}
+        copy_desc = (
+            "verbatim"
+            if lo == hi == 1.0
+            else f"imperfect, target cosine U[{lo:.3f}, {hi:.3f}], norm-preserving"
+        )
         print(
             f"  [Mimic Attacker {client_id}] copies benign client "
-            f"{self.mimic_target_id} verbatim; trains honestly, injects no poison "
+            f"{self.mimic_target_id} ({copy_desc}); trains honestly, no label poison "
             f"(claimed_data_size={self.claimed_data_size:.0f})"
         )
 
@@ -116,7 +134,7 @@ class MimicAttackerClient(BenignClient):
         }
 
     def camouflage_update(self, poisoned_update: torch.Tensor) -> torch.Tensor:
-        """Discard our own honest update, submit the target's instead."""
+        """Submit an exact or controlled imperfect copy of the target update."""
         target = self._benign_updates.get(self.mimic_target_id)
         if target is None:
             # Loud rather than silent: falling back to our own update would turn
@@ -127,7 +145,42 @@ class MimicAttackerClient(BenignClient):
                 f"mimic_target_id={self.mimic_target_id}; got "
                 f"{sorted(self._benign_updates)}. Is the target actually benign?"
             )
-        return target.clone()
+        target = target.clone()
+        lo, hi = self.mimic_cosine_range
+        if lo == hi == 1.0:
+            return target
+        if target.shape != poisoned_update.shape:
+            raise RuntimeError(
+                f"MimicAttackerClient {self.client_id}: own/target update shape "
+                f"mismatch {tuple(poisoned_update.shape)} != {tuple(target.shape)}"
+            )
+        target_norm = torch.linalg.vector_norm(target)
+        if not torch.isfinite(target_norm) or target_norm.item() <= 1e-12:
+            raise RuntimeError(
+                f"MimicAttackerClient {self.client_id}: target update has zero or "
+                "non-finite norm; target cosine is undefined"
+            )
+        seed = (
+            self.mimic_noise_seed * 1_000_003
+            + self.client_id * 100_069
+            + self.current_round * 10_007
+        )
+        target_cosine = random.Random(seed).uniform(lo, hi)
+        target_hat = target / target_norm
+        own = poisoned_update.to(device=target.device, dtype=target.dtype)
+        residual = own - torch.dot(own.reshape(-1), target_hat.reshape(-1)) * target_hat
+        residual_norm = torch.linalg.vector_norm(residual)
+        if not torch.isfinite(residual_norm) or residual_norm.item() <= 1e-12:
+            if target_hat.numel() < 2:
+                raise RuntimeError("imperfect mimic needs an update with at least 2 values")
+            residual = torch.zeros_like(target_hat)
+            index = int(torch.argmin(target_hat.abs()).item())
+            residual.reshape(-1)[index] = 1.0
+            residual -= target_hat.reshape(-1)[index] * target_hat
+            residual_norm = torch.linalg.vector_norm(residual)
+        residual_hat = residual / residual_norm
+        sine = math.sqrt(max(0.0, 1.0 - target_cosine * target_cosine))
+        return target_norm * (target_cosine * target_hat + sine * residual_hat)
 
     # --------------------- server compatibility no-ops --------------------- #
 

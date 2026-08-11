@@ -477,6 +477,12 @@ def setup_experiment(config):
                         data_indices=client_indices[client_id],
                         grad_clip_norm=config.get('grad_clip_norm', 1.0),
                         claimed_data_size=claimed_data_size,
+                        mimic_cosine_range=config.get(
+                            'hallu_mimic_cosine_range', [1.0, 1.0]
+                        ),
+                        mimic_noise_seed=int(config.get(
+                            'hallu_mimic_noise_seed', config.get('seed', 42)
+                        )),
                     )
                 else:
                     client = HallucinationAttackerClient(
@@ -1267,7 +1273,7 @@ def main():
         # ========== Experiment ==========
         # flip params are INERT in this arm: under hallu_mimic_benign no attacker
         # flips anything, so the name records 'noflip' rather than a ratio range.
-        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-mimic-benign(localround=1,seed=42,r50,len128,noflip)-qwen',
+        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-qwen',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1384,15 +1390,10 @@ def main():
         #             low-entropy by design, so detection collapsing is the EXPECTED
         #             result, NOT a licence to re-tune v4_tau_ratio. Needs num_labels >= 3.
         #   mimic     UPDATE-space, ACTIVE ARM. EVERY attacker trains honestly and
-        #             submits a VERBATIM COPY of the SAME benign client (largest shard)
-        #             — the canonical mimic attack of Karimireddy et al., ICLR '22.
-        #             Exact copies make FoolsGold's pardoning factor
-        #             min(1, max_cs[i]/max_cs[j]) equal 1 in both directions, so the
-        #             honest victim is unpardonable and is zeroed alongside the
-        #             copycats. Zero poison is injected, so 100% of the accuracy the
-        #             federation loses is the defense's own false positive. V4+/V8 is
-        #             NOT deceived: every local model is genuinely benign, so the
-        #             absolute per-client CSE is normal and crafts_update stays False.
+        #             submits a close copy of the SAME benign client (largest shard).
+        #             A small, norm-preserving residual makes C5/C6 non-identical while
+        #             retaining the high similarity that can trigger a FoolsGold false
+        #             alarm on the benign target. No labels are flipped.
         #             Under plain FedAvg this arm still skews weighting (the victim's
         #             direction gets the copycats' data weight too), so the true
         #             ceiling is a separate NoAttack run, not this arm's FedAvg row.
@@ -1400,6 +1401,10 @@ def main():
         'hallu_disjoint_target_subsets': False,
         'hallu_opposite_directions': False,
         'hallu_mimic_benign': True,
+        # Imperfect copies stay close to B0 but are not identical.  [1, 1]
+        # reproduces the previous exact-copy experiment.
+        'hallu_mimic_cosine_range': [0.72, 0.82],
+        'hallu_mimic_noise_seed': 42,
 
         # ---- Classical Byzantine baselines; each key is read only when
         # attack_method selects that family. These forge the UPDATE while
@@ -1529,11 +1534,11 @@ def main():
 
         # ========== Checkpoints ==========
         'save_global_checkpoint': True,   # needed for PPL / downstream eval
-        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_foolsgold_allmimic_seed42',
+        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
         # Per-round resume snapshot (Colab resilience; fingerprint guard: fed_resume.py)
         'save_round_checkpoint': True,
         'resume_from_checkpoint': True,   # False = force a fresh run
-        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_foolsgold_allmimic_seed42',
+        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
         # ========== Task 2: optional downstream generation after FL ==========
         'run_downstream_after_fl': False,   # subprocess run_downstream_generation.py
         'downstream_probes': None,          # probe JSON path; None skips Task 2

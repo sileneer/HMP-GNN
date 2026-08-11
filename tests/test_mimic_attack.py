@@ -1,7 +1,8 @@
 # tests/test_mimic_attack.py
 # CPU-only sanity tests for the mimic (copycat) attacker, arm C of the
 # heterogeneous-attacker experiments (2026-08-09):
-#   - the client submits its target's update, not its own
+#   - exact mode submits its target's update, not its own
+#   - imperfect mode hits a configured cosine, preserves norm, and is resumable
 #   - a missing / self target crashes loudly instead of degrading to benign
 #   - THE POINT OF THE ARM: an exact copy drives the mimicked BENIGN client's
 #     FoolsGold weight to zero, i.e. manufactures a false positive
@@ -32,7 +33,12 @@ from attack.mimic import MimicAttackerClient
 from defense.foolsgold import FoolsGoldDefense
 
 
-def _make_mimic(client_id: int = 3, target: int = 0) -> MimicAttackerClient:
+def _make_mimic(
+    client_id: int = 3,
+    target: int = 0,
+    cosine_range=None,
+    noise_seed: int = 42,
+) -> MimicAttackerClient:
     # MimicAttackerClient.__init__ only deep-copies the model and stores config;
     # nothing here touches the DataLoader or the parameters, so a bare Linear and
     # data_loader=None are enough for the update-space contract.
@@ -45,6 +51,8 @@ def _make_mimic(client_id: int = 3, target: int = 0) -> MimicAttackerClient:
         alpha=0.0,
         mimic_target_id=target,
         claimed_data_size=100.0,
+        mimic_cosine_range=cosine_range,
+        mimic_noise_seed=noise_seed,
     )
 
 
@@ -96,6 +104,49 @@ def test_missing_target_crashes_loudly():
         pass
     else:
         raise AssertionError("missing client_ids must raise")
+
+
+def test_imperfect_copy_hits_cosine_and_preserves_norm():
+    mimic = _make_mimic(
+        client_id=5, target=0, cosine_range=[0.72, 0.82], noise_seed=42
+    )
+    mimic.set_round(7)
+    target = torch.tensor([3.0, 4.0, 0.0, 0.0])
+    own = torch.tensor([0.0, 1.0, 2.0, 3.0])
+    mimic.receive_benign_updates([target], client_ids=[0])
+    out_a = mimic.camouflage_update(own)
+    out_b = mimic.camouflage_update(own)
+
+    actual_cos = torch.dot(out_a, target) / (out_a.norm() * target.norm())
+    assert 0.72 <= actual_cos.item() <= 0.82
+    assert torch.allclose(out_a.norm(), target.norm(), atol=1e-6, rtol=1e-6)
+    assert torch.equal(out_a, out_b), "same client/round must be resume-stable"
+
+    mimic.set_round(8)
+    out_next = mimic.camouflage_update(own)
+    assert not torch.equal(out_a, out_next), "different rounds should vary"
+
+
+def test_imperfect_copy_parallel_own_update_uses_safe_fallback():
+    mimic = _make_mimic(
+        client_id=6, target=0, cosine_range=[0.95, 0.95], noise_seed=42
+    )
+    target = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    mimic.receive_benign_updates([target], client_ids=[0])
+    out = mimic.camouflage_update(2.0 * target)
+    actual_cos = torch.dot(out, target) / (out.norm() * target.norm())
+    assert abs(actual_cos.item() - 0.95) < 1e-6
+    assert torch.allclose(out.norm(), target.norm(), atol=1e-6, rtol=1e-6)
+
+
+def test_invalid_cosine_range_crashes_loudly():
+    for bad in ([0.9], [0.98, 0.93], [0.0, 0.5], [0.9, 1.1]):
+        try:
+            _make_mimic(cosine_range=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid cosine range should fail: {bad}")
 
 
 def test_exact_copy_zeroes_the_victims_foolsgold_weight():
@@ -176,6 +227,9 @@ def test_all_attackers_copying_one_victim_zero_the_whole_trio():
 if __name__ == "__main__":
     test_submits_target_update_not_own()
     test_missing_target_crashes_loudly()
+    test_imperfect_copy_hits_cosine_and_preserves_norm()
+    test_imperfect_copy_parallel_own_update_uses_safe_fallback()
+    test_invalid_cosine_range_crashes_loudly()
     test_exact_copy_zeroes_the_victims_foolsgold_weight()
     test_all_attackers_copying_one_victim_zero_the_whole_trio()
     print("\nAll mimic-attack tests passed.")
