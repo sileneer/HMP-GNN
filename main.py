@@ -1273,7 +1273,7 @@ def main():
         # ========== Experiment ==========
         # flip params are INERT in this arm: under hallu_mimic_benign no attacker
         # flips anything, so the name records 'noflip' rather than a ratio range.
-        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-qwen',
+        'experiment_name': 'agnews-(non-iid0.5)-hmpgae-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-qwen',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1424,7 +1424,7 @@ def main():
         # | 'fltrust' | 'foolsgold'. Matching is case-insensitive and accepts
         # separator variants ('multikrum', 'coord-median', ...); 'none' is an
         # alias for 'fedavg'. Anything else raises in defense.build_defense.
-        'defense_method': 'foolsgold',
+        'defense_method': 'hmpgae',
         'defense_config': {
             # -- Baseline-defense knobs — inert under hmp_gae, EXCEPT num_byzantine:
             # the CSE-reject family reuses it as its rank cap (must be < N/2).
