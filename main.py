@@ -1273,7 +1273,7 @@ def main():
         # ========== Experiment ==========
         # flip params are INERT in this arm: under hallu_mimic_benign no attacker
         # flips anything, so the name records 'noflip' rather than a ratio range.
-        'experiment_name': 'agnews-(non-iid0.5)-hmpgae-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-qwen',
+        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-llama',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1350,7 +1350,7 @@ def main():
         # 'EleutherAI/pythia-160m' | 'EleutherAI/pythia-1b' | 'facebook/opt-125m' |
         # 'Qwen/Qwen2.5-0.5B' (ungated, fits T4 15GB) | 'meta-llama/Llama-3.2-1B'
         # (GATED: HF license + HF_TOKEN; fp32 needs A100). PPL needs a decoder.
-        'model_name': 'Qwen/Qwen2.5-0.5B',
+        'model_name': 'meta-llama/Llama-3.2-1B',
         
 
         # ========== Attack ==========
@@ -1424,7 +1424,7 @@ def main():
         # | 'fltrust' | 'foolsgold'. Matching is case-insensitive and accepts
         # separator variants ('multikrum', 'coord-median', ...); 'none' is an
         # alias for 'fedavg'. Anything else raises in defense.build_defense.
-        'defense_method': 'hmpgae',
+        'defense_method': 'foolsgold',
         'defense_config': {
             # -- Baseline-defense knobs — inert under hmp_gae, EXCEPT num_byzantine:
             # the CSE-reject family reuses it as its rank cap (must be < N/2).
@@ -1534,11 +1534,11 @@ def main():
 
         # ========== Checkpoints ==========
         'save_global_checkpoint': True,   # needed for PPL / downstream eval
-        'global_checkpoint_subdir': 'global_checkpoint_agnews_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
+        'global_checkpoint_subdir': 'global_checkpoint_agnews_llama_foolsgold_imperfectmimic_cos072_082_seed42',
         # Per-round resume snapshot (Colab resilience; fingerprint guard: fed_resume.py)
         'save_round_checkpoint': True,
         'resume_from_checkpoint': True,   # False = force a fresh run
-        'round_checkpoint_subdir': 'round_checkpoint_agnews_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
+        'round_checkpoint_subdir': 'round_checkpoint_agnews_llama_foolsgold_imperfectmimic_cos072_082_seed42',
         # ========== Task 2: optional downstream generation after FL ==========
         'run_downstream_after_fl': False,   # subprocess run_downstream_generation.py
         'downstream_probes': None,          # probe JSON path; None skips Task 2
