@@ -1273,7 +1273,7 @@ def main():
         # ========== Experiment ==========
         # flip params are INERT in this arm: under hallu_mimic_benign no attacker
         # flips anything, so the name records 'noflip' rather than a ratio range.
-        'experiment_name': 'agnews-(non-iid0.5)-foolsgold-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-llama',
+        'experiment_name': 'yahoo-(non-iid0.5)-foolsgold-all-imperfect-mimic-benign(localround=1,seed=42,r50,len128,noflip,cos0.72-0.82)-qwen',
         'seed': 42,
 
         # ========== Federated Learning Setup ==========
@@ -1301,17 +1301,17 @@ def main():
         # Python keeps the LAST assignment of each key — no error, wrong run.
         # Remember to update experiment_name and both checkpoint subdirs too.
 
-        # -- AG News: 4 classes, news topic classification (current arm) --
-        'dataset': 'ag_news',
-        'num_labels': 4,
-        'max_length': 128,
+        # -- AG News: 4 classes, news topic classification --
+        # 'dataset': 'ag_news',
+        # 'num_labels': 4,
+        # 'max_length': 128,
 
-        # -- Yahoo Answers: 10 classes, question topic classification --
+        # -- Yahoo Answers: 10 classes, question topic classification (current arm) --
         # 128 (not 256) is deliberate: it keeps sequence length constant across
         # datasets so runs stay comparable. 256 is a separate ablation.
-        # 'dataset': 'yahoo_answers',
-        # 'num_labels': 10,
-        # 'max_length': 128,
+        'dataset': 'yahoo_answers',
+        'num_labels': 10,
+        'max_length': 128,
 
         # -- IMDB: 2 classes, sentiment; long reviews need the longer window --
         # 'dataset': 'imdb',
@@ -1350,7 +1350,7 @@ def main():
         # 'EleutherAI/pythia-160m' | 'EleutherAI/pythia-1b' | 'facebook/opt-125m' |
         # 'Qwen/Qwen2.5-0.5B' (ungated, fits T4 15GB) | 'meta-llama/Llama-3.2-1B'
         # (GATED: HF license + HF_TOKEN; fp32 needs A100). PPL needs a decoder.
-        'model_name': 'meta-llama/Llama-3.2-1B',
+        'model_name': 'Qwen/Qwen2.5-0.5B',
         
 
         # ========== Attack ==========
@@ -1534,11 +1534,11 @@ def main():
 
         # ========== Checkpoints ==========
         'save_global_checkpoint': True,   # needed for PPL / downstream eval
-        'global_checkpoint_subdir': 'global_checkpoint_agnews_llama_foolsgold_imperfectmimic_cos072_082_seed42',
+        'global_checkpoint_subdir': 'global_checkpoint_yahoo_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
         # Per-round resume snapshot (Colab resilience; fingerprint guard: fed_resume.py)
         'save_round_checkpoint': True,
         'resume_from_checkpoint': True,   # False = force a fresh run
-        'round_checkpoint_subdir': 'round_checkpoint_agnews_llama_foolsgold_imperfectmimic_cos072_082_seed42',
+        'round_checkpoint_subdir': 'round_checkpoint_yahoo_qwen_foolsgold_imperfectmimic_cos072_082_seed42',
         # ========== Task 2: optional downstream generation after FL ==========
         'run_downstream_after_fl': False,   # subprocess run_downstream_generation.py
         'downstream_probes': None,          # probe JSON path; None skips Task 2
